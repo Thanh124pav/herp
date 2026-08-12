@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .grouper import chunk_experience_distance, experience_distance
+from .grouper import experience_distance
 from .trajectory import Chunk, Experience
 
 
