@@ -169,12 +169,18 @@ class OnlineTrainer:
         return ids, C, n_success_chunks
 
     def _route(self) -> None:
-        if not self._segmenter_fitted or not self.vocabulary.experiences:
+        # Transition-level baselines (share_all/random/td_priority) route from raw
+        # buffers and only need warmup data; experience-level routers (greedy/uot)
+        # additionally need a valid competence matrix and guard on it internally.
+        if self.population.total_env_steps < self.cfg.warmup_steps:
             return
-        ids, C, n_success_chunks = self._valid_matrix()
-        if C.size == 0:
-            return
-        self._last_matrix = (ids, C, n_success_chunks)  # snapshot for final artifacts
+        if self._segmenter_fitted and self.vocabulary.experiences:
+            ids, C, n_success_chunks = self._valid_matrix()
+        else:
+            N = self.cfg.population_size
+            ids, C, n_success_chunks = [], np.zeros((N, 0)), np.zeros((N, 0), dtype=int)
+        if C.size:
+            self._last_matrix = (ids, C, n_success_chunks)  # snapshot for final artifacts
         t0 = time.time()
         ctx = RoutingContext(
             competence=C, experience_ids=ids, n_success_chunks=n_success_chunks,
@@ -188,7 +194,7 @@ class OnlineTrainer:
         self.timing["routing_time"] += time.time() - t0
         self.budget.record_routing(routes)
         self.last_routes = routes
-        if self.cfg.router == "uot":
+        if self.cfg.router == "uot" and C.size:
             from .routing.uot import UOTConfig, solve_transport
             try:
                 self.last_gamma = solve_transport(C, n_success_chunks, UOTConfig())

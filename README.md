@@ -81,6 +81,24 @@ python scripts/inspect_competence.py           # sections 9-10 heatmaps + Gate C
 
 Swap to Meta-World with `--env metaworld:reach-v2` once the extras are installed.
 
+## Validated result (synthetic env, CPU)
+
+A 48k-step UOT run (`--total-env-steps 48000`, N=4) end-to-end on CPU:
+
+- all 4 policies learn the task (per-policy success 0.13–0.27);
+- the pipeline discovers a dynamic experience vocabulary and marks **6 valid**
+  experiences via the success-support filter;
+- the competence matrix is **complementary** — different policies are strongest
+  on different experiences (`best_policy_per_experience = [0,0,1,0,2,1]`, i.e.
+  3 of 4 policies each lead on some experience), which is **Gate C** (PLAN.md
+  section 25) — the local-comparative-advantage the routing hypothesis needs;
+- UOT routes **117 exemplar chunks** from donors to receiver deficits; the OT
+  solve is sub-millisecond thanks to routing over the (capped) valid set only.
+
+Numbers vary with seed; the point is that the simple state-transition pipeline
+produces a **non-trivial routing signal** (PLAN.md section 26), which is the MVP's
+question to answer before scaling to Meta-World/GPU.
+
 ## Tests
 
 ```bash
