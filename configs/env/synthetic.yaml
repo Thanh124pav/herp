@@ -1,0 +1,3 @@
+# Synthetic pick-and-place env (drop-in swap for Meta-World)
+env: synthetic
+# For Meta-World instead:  env: metaworld:reach-v2   (needs .[metaworld] extras)

@@ -1,0 +1,10 @@
+# Routing defaults (PLAN.md sections 13, 23)
+router: uot                # no_share | share_all | random | td_priority | greedy | uot
+routing_interval: 5000
+budget_chunks: 32
+max_chunks_per_experience: 200
+demand_power: 1.0
+# unbalanced OT solver
+ot_reg: 0.05
+ot_reg_m: 1.0
+big_cost: 1000.0

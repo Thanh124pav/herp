@@ -1,0 +1,7 @@
+# Population defaults (PLAN.md section 23)
+population_size: 4
+total_env_steps: 60000
+warmup_steps: 1000
+batch_size: 128
+route_batch_fraction: 0.25
+seed: 0

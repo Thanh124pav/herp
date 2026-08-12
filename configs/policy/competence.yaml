@@ -1,0 +1,7 @@
+# Competence estimation defaults (PLAN.md sections 9, 23)
+beta_alpha: 1.0
+beta_beta: 1.0
+min_opportunities: 5
+horizon: 8
+eps_pre: 2.0
+eps_effect: 1.5

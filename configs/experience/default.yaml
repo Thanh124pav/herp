@@ -1,0 +1,12 @@
+# Experience discovery defaults (PLAN.md sections 6-8, 23)
+k_seg: 6
+median_window: 7
+min_chunk_len: 4
+eps_experience: 0.8        # calibrated from NN descriptor distances (section 24)
+eps_merge: null            # defaults to 0.7 * eps_experience
+alpha_pre: 0.5
+alpha_eff: 0.5
+min_success_support: 3
+success_support_threshold: 0.05
+refresh_interval: 10000
+segmenter_fit_after: 6000
