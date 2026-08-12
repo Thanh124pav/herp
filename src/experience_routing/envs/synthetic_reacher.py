@@ -53,8 +53,8 @@ class SyntheticPickPlace(BaseEnv):
         self,
         perturbation: PerturbationSpec | None = None,
         arena: float = 1.0,
-        grasp_radius: float = 0.12,
-        success_radius: float = 0.12,
+        grasp_radius: float = 0.20,
+        success_radius: float = 0.18,
     ):
         self.spec = _SPEC
         self.pert = perturbation or PerturbationSpec()
@@ -102,7 +102,7 @@ class SyntheticPickPlace(BaseEnv):
 
     def step(self, action: np.ndarray):
         action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
-        move = action[:2] * self.pert.move_speed * 0.15
+        move = action[:2] * self.pert.move_speed * 0.20
         # perturbed control gain adds mild per-policy dynamics differences
         self.ee = np.clip(self.ee + move, -self.arena * 1.5, self.arena * 1.5)
         self.grip = float(np.clip(self.grip + action[2] * 0.5, 0.0, 1.0))

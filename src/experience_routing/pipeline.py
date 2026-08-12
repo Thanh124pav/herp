@@ -43,7 +43,7 @@ class PipelineConfig:
     k_seg: int = 6
     median_window: int = 7
     min_chunk_len: int = 4
-    eps_experience: float = 0.8  # calibrated from NN descriptor distances (PLAN section 24)
+    eps_experience: float = 1.1  # calibrated from NN descriptor distances (PLAN section 24)
     eps_merge: float | None = None
     alpha_pre: float = 0.5
     alpha_eff: float = 0.5
@@ -63,6 +63,7 @@ class PipelineConfig:
     routing_interval: int = 5_000
     budget_chunks: int = 32
     max_chunks_per_experience: int = 200
+    max_routed_experiences: int = 40  # cap the OT problem size (bounded runtime)
     demand_power: float = 1.0
     # evaluation
     eval_interval: int = 10_000
@@ -112,6 +113,7 @@ class OnlineTrainer:
         self.timing = {"routing_time": 0.0, "eval_time": 0.0}
         self.last_routes = []
         self.last_gamma = None
+        self._last_matrix = None  # (ids, C, n_success) snapshot from last real routing round
 
     # -- pipeline stages ---------------------------------------------------
     def _process_trajectory(self, traj) -> None:
@@ -123,12 +125,14 @@ class OnlineTrainer:
             eid = self.vocabulary.assign(chunk)
             self.bank.add(eid, chunk)
             self.validity.observe_chunk(eid, traj.policy_id, traj.episode_id, traj.success)
-        # Competence only matters for experiences we may route (the valid ones),
-        # which is a small set -- scanning all K would dominate runtime.
-        valid = {e: self.vocabulary.experiences[e] for e in self.valid_ids
-                 if e in self.vocabulary.experiences}
-        if valid:
-            self.competence.observe(traj, valid)
+        # Competence only matters for experiences we may route (the valid ones).
+        # Bound the scan to the routable set so runtime stays independent of K.
+        ids = [e for e in self.valid_ids if e in self.vocabulary.experiences]
+        if len(ids) > self.cfg.max_routed_experiences:
+            ids = sorted(ids, key=lambda e: -self.validity.n_success_support(e))
+            ids = ids[: self.cfg.max_routed_experiences]
+        if ids:
+            self.competence.observe(traj, {e: self.vocabulary.experiences[e] for e in ids})
 
     def _maybe_fit_segmenter(self) -> None:
         if self._segmenter_fitted:
@@ -144,9 +148,20 @@ class OnlineTrainer:
         self.valid_ids = self.validity.update(self.vocabulary)
 
     def _valid_matrix(self):
+        """Competence/supply over the *valid* experiences only.
+
+        Routing operates exclusively on valid experiences (never the full
+        vocabulary), and the set is capped for a bounded OT problem. Returns an
+        empty matrix when nothing is valid yet -- routing is then skipped.
+        """
         ids = [i for i in self.valid_ids if i in self.vocabulary.experiences]
+        # cap the routed set (bound the OT problem) by success support
+        if len(ids) > self.cfg.max_routed_experiences:
+            ids = sorted(ids, key=lambda e: -self.validity.n_success_support(e))
+            ids = ids[: self.cfg.max_routed_experiences]
         if not ids:
-            ids = list(self.vocabulary.experiences.keys())
+            N = self.cfg.population_size
+            return [], np.zeros((N, 0)), np.zeros((N, 0), dtype=int)
         C, trials, succ = self.competence.matrix(ids)
         n_success_chunks = np.array(
             [[self.bank.n_successful(p, e) for e in ids] for p in range(self.cfg.population_size)]
@@ -159,6 +174,7 @@ class OnlineTrainer:
         ids, C, n_success_chunks = self._valid_matrix()
         if C.size == 0:
             return
+        self._last_matrix = (ids, C, n_success_chunks)  # snapshot for final artifacts
         t0 = time.time()
         ctx = RoutingContext(
             competence=C, experience_ids=ids, n_success_chunks=n_success_chunks,
@@ -226,9 +242,10 @@ class OnlineTrainer:
         return self.results()
 
     def results(self) -> dict:
-        ids, C, n_success_chunks = (
-            self._valid_matrix() if self.vocabulary.experiences else ([], np.zeros((0, 0)), np.zeros((0, 0)))
-        )
+        ids, C, n_success_chunks = self._valid_matrix()
+        if C.size == 0 and self._last_matrix is not None:
+            # fall back to the last real routing snapshot for a stable final heatmap
+            ids, C, n_success_chunks = self._last_matrix
         final_eval = self.population.evaluate_all(self.cfg.episodes_per_policy)
         return {
             "config": self.cfg,

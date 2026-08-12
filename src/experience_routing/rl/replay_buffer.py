@@ -26,11 +26,11 @@ class ReplayBuffer:
 
     def add(self, obs, action, reward, next_obs, done) -> None:
         i = self.ptr
-        self.obs[i] = obs
-        self.actions[i] = action
-        self.rewards[i] = reward
-        self.next_obs[i] = next_obs
-        self.dones[i] = float(done)
+        self.obs[i] = np.ravel(obs)
+        self.actions[i] = np.ravel(action)
+        self.rewards[i] = float(np.ravel(reward)[0])
+        self.next_obs[i] = np.ravel(next_obs)
+        self.dones[i] = float(np.ravel(done)[0])
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 

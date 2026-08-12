@@ -20,7 +20,7 @@ class PerturbationSpec:
     grasp_ease: float = 1.0  # multiplier on effective grasp radius
 
     @staticmethod
-    def for_policy(policy_id: int, n_policies: int, strength: float = 0.25) -> "PerturbationSpec":
+    def for_policy(policy_id: int, n_policies: int, strength: float = 0.4) -> "PerturbationSpec":
         """Deterministically spread policies across a small perturbation range.
 
         Policy 0 stays near nominal; others get mild, distinct biases toward being

@@ -22,11 +22,13 @@ class ValidityConfig:
 
 
 class ValidityFilter:
-    def __init__(self, config: ValidityConfig | None = None):
+    def __init__(self, config: ValidityConfig | None = None, latch: bool = True):
         self.config = config or ValidityConfig()
+        self.latch = bool(latch)  # once valid, stay valid (stable routed set)
         # experience_id -> set of successful episode keys (policy_id, episode_id)
         self._success_episodes: dict[int, set[tuple[int, int]]] = {}
         self._total_success_episodes: set[tuple[int, int]] = set()
+        self._latched: set[int] = set()
 
     def observe_chunk(self, experience_id: int, policy_id: int, episode_id: int, success: bool) -> None:
         if not success:
@@ -53,11 +55,19 @@ class ValidityFilter:
         )
 
     def update(self, vocabulary: ExperienceVocabulary) -> list[int]:
-        """Refresh the ``valid`` flag on every experience; return valid ids."""
+        """Refresh the ``valid`` flag on every experience; return valid ids.
+
+        With ``latch`` (default), an experience that once met the criteria stays
+        valid -- a repeatedly-useful functional experience does not stop being one
+        just because the pool of successful episodes later grows.
+        """
         valid_ids = []
         for eid, exp in vocabulary.experiences.items():
             exp.n_success_episodes = self.n_success_support(eid)
-            exp.valid = self.is_valid(eid)
+            currently = self.is_valid(eid)
+            if currently:
+                self._latched.add(eid)
+            exp.valid = currently or (self.latch and eid in self._latched)
             if exp.valid:
                 valid_ids.append(eid)
         return valid_ids
