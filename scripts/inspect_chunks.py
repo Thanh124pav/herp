@@ -25,7 +25,7 @@ from experience_routing.population.rollout_manager import RolloutManager  # noqa
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--num", type=int, default=12, help="trajectories to plot")
+    p.add_argument("--num", type=int, default=100, help="trajectories to plot (PLAN.md 6.3)")
     p.add_argument("--collect-rounds", type=int, default=1500)
     p.add_argument("--outdir", default="outputs/chunk_diagnostics")
     args = p.parse_args()
@@ -40,12 +40,13 @@ def main() -> None:
 
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
-    successes = [t for t in trajs if t.success] or trajs
+    # plot successes first (more interesting), then pad with any trajectories
+    ordered = [t for t in trajs if t.success] + [t for t in trajs if not t.success]
     n_chunks_all = []
     for t in trajs:
         n_chunks_all.append(len(seg.segment(t)))
 
-    for i, traj in enumerate(successes[: args.num]):
+    for i, traj in enumerate(ordered[: args.num]):
         chunks = seg.segment(traj)
         labels = seg._labels_for(traj)
         tf = seg.spec.task_features(traj.states)
@@ -70,9 +71,31 @@ def main() -> None:
         plt.close(fig)
 
     import numpy as np
-    print(f"wrote {min(args.num, len(successes))} boundary plots to {out}/")
-    print(f"chunks/traj mean={np.mean(n_chunks_all):.2f} "
-          f"min={min(n_chunks_all)} max={max(n_chunks_all)}")
+
+    # summary diagnostic: chunks-per-trajectory histogram (PLAN.md section 6.3)
+    n_chunks_all = np.asarray(n_chunks_all)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    bins = np.arange(0, n_chunks_all.max() + 2) - 0.5
+    ax.hist(n_chunks_all, bins=bins, color="tab:purple", alpha=0.8)
+    ax.set_title(f"Chunks per trajectory (N={len(n_chunks_all)} trajs)")
+    ax.set_xlabel("num chunks")
+    ax.set_ylabel("count")
+    fig.tight_layout()
+    fig.savefig(out / "chunks_per_traj_hist.png", dpi=110)
+    plt.close(fig)
+
+    mean_c = float(n_chunks_all.mean())
+    frac_single = float(np.mean(n_chunks_all <= 1))
+    # a per-step-splitter would produce ~max_steps chunks; flag if mean is huge
+    over_split = mean_c > 0.5 * pop[0].env.spec.max_steps
+    n_plotted = min(args.num, len(ordered))
+    print(f"wrote {n_plotted} boundary plots + summary histogram to {out}/")
+    print(f"chunks/traj mean={mean_c:.2f} min={int(n_chunks_all.min())} "
+          f"max={int(n_chunks_all.max())} frac_single_chunk={frac_single:.2f}")
+    ok = (not over_split) and frac_single < 0.5 and mean_c > 1.0
+    verdict = ("PASS" if ok else "CHECK") + " (Gate B sanity, PLAN.md 6.3/25)"
+    print(f"segmenter sanity: {verdict} -- "
+          f"{'not per-step, not one-chunk-per-traj' if ok else 'inspect thresholds'}")
 
 
 if __name__ == "__main__":

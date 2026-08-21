@@ -26,11 +26,17 @@ class ExperienceVocabulary:
         eps_merge: float | None = None,
         alpha_pre: float = 0.5,
         alpha_eff: float = 0.5,
+        max_experiences: int | None = None,
     ):
         self.eps_experience = float(eps_experience)
         self.eps_merge = float(eps_merge if eps_merge is not None else 0.7 * eps_experience)
         self.alpha_pre = float(alpha_pre)
         self.alpha_eff = float(alpha_eff)
+        # Hard cap on vocabulary size: once reached, an unmatched chunk is absorbed
+        # into its nearest prototype instead of spawning a new experience. Bounds
+        # both the O(K) assign and the O(K^2) merge, and curbs the fragmentation
+        # that diffuse early exploration causes (PLAN.md section 7.3 anti-frag).
+        self.max_experiences = int(max_experiences) if max_experiences else None
         self.experiences: dict[int, Experience] = {}
         self.merge_count = 0
         self._next_id = 0
@@ -104,7 +110,8 @@ class ExperienceVocabulary:
         d = self.alpha_pre * np.linalg.norm(self._pre - pre, axis=1) + \
             self.alpha_eff * np.linalg.norm(self._eff - eff, axis=1)
         j = int(np.argmin(d))
-        if d[j] <= self.eps_experience:
+        at_cap = self.max_experiences is not None and len(self.experiences) >= self.max_experiences
+        if d[j] <= self.eps_experience or at_cap:
             exp = self.experiences[self._ids[j]]
             self._update_prototype(exp, chunk)
             chunk.experience_id = exp.experience_id

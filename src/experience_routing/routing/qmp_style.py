@@ -29,6 +29,19 @@ def select_action(receiver_agent, candidate_agents, obs: np.ndarray, determinist
     return best_a
 
 
+def qmp_behavior_selector(worker, population) -> np.ndarray:
+    """RolloutManager hook: pick the receiver-Q-best candidate action (B5).
+
+    Every population policy proposes an action at the receiver's current state;
+    the receiver's own critic scores them and the best is executed. Exploration
+    is preserved by sampling (``deterministic=False``) from each candidate.
+    """
+    candidates = [w.agent for w in population]
+    return select_action(
+        worker.agent, candidates, worker.current_obs, deterministic=False
+    )
+
+
 class QMPStyleRouter(Router):
     """Registry placeholder: QMP-style sharing routes no replay data."""
 

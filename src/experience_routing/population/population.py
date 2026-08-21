@@ -28,6 +28,11 @@ class Population:
         env_factory: Callable[[int, int], BaseEnv] = default_env_factory,
         route_batch_fraction: float = 0.25,
         base_seed: int = 0,
+        hidden: int = 128,
+        utd: int = 1,
+        device: str = "cpu",
+        obs_norm: bool = False,
+        lr: float = 3e-4,
     ):
         self.size = int(size)
         self.workers: list[Worker] = [
@@ -36,6 +41,7 @@ class Population:
                 env=env_factory(i, size),
                 route_batch_fraction=route_batch_fraction,
                 seed=base_seed + 100 * i,
+                hidden=hidden, utd=utd, device=device, obs_norm=obs_norm, lr=lr,
             )
             for i in range(size)
         ]

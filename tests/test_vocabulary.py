@@ -20,6 +20,20 @@ def test_merge_reduces_fragmentation():
     assert len(vocab) == 1
 
 
+def test_max_experiences_caps_vocabulary():
+    # With a hard cap of 2, a third distinct chunk is absorbed into its nearest
+    # prototype instead of spawning a new experience (bounds K).
+    vocab = ExperienceVocabulary(eps_experience=0.01, eps_merge=0.005, max_experiences=2)
+    a = vocab.assign(make_chunk(0, pre=[0, 0, 0, 0], effect=[0, 0, 0, 0]))
+    b = vocab.assign(make_chunk(1, pre=[5, 0, 0, 0], effect=[0, 0, 0, 0]))
+    assert len(vocab) == 2 and a != b
+    # a far-away third chunk would normally create a 3rd cluster, but the cap
+    # forces absorption into the nearest existing prototype.
+    c = vocab.assign(make_chunk(2, pre=[10, 0, 0, 0], effect=[0, 0, 0, 0]))
+    assert len(vocab) == 2
+    assert c in (a, b)
+
+
 def test_repeated_success_becomes_valid():
     vf = ValidityFilter(ValidityConfig(min_success_support=3, success_support_threshold=0.05))
     # experience 7 appears in 4 distinct successful episodes

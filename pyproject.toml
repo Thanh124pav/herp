@@ -22,8 +22,11 @@ dependencies = [
 # The RL backbone (SAC) uses PyTorch. Install the CPU wheel:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
 rl = ["torch>=2.0"]
-# Real Meta-World environment (heavy; optional drop-in swap for the synthetic env)
-metaworld = ["metaworld", "mujoco", "gymnasium>=0.29"]
+# Real Meta-World environment (heavy; optional drop-in swap for the synthetic env).
+# Current Farama Meta-World ships the V3 suite; the adapter also accepts V2.
+metaworld = ["metaworld", "mujoco>=2.3", "gymnasium>=0.29"]
+# Experiment logging (PLAN.md section 21). Runs also always log locally (JSONL).
+logging = ["wandb>=0.16"]
 dev = ["pytest>=7.0"]
 
 [tool.setuptools.packages.find]
