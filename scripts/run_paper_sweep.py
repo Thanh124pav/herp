@@ -1,20 +1,24 @@
 """Paper experiment driver — multi-seed routing comparison (PLAN.md sections 19.4, 20).
 
-Runs each router across several seeds at a *matched budget* (same N, same total
-env interactions, same routing bandwidth), then aggregates mean +/- std across
-seeds and writes a comparison table (JSON + CSV) and a bar chart with error bars.
+Runs each (router, seed) cell at a *matched budget* (same N, same total env
+interactions, same routing bandwidth). Cells are independent, so they run in a
+process pool; each worker pins torch to a single thread so several cells share
+the CPU without oversubscription. Aggregates mean +/- std across seeds and
+writes a comparison table (JSON + CSV) and a bar chart with error bars.
 
     python scripts/run_paper_sweep.py \
         --routers no_share share_all random td_priority greedy uot \
-        --population-size 8 --total-env-steps 120000 --seeds 0 1 2 \
-        --outdir outputs/paper/headline
+        --population-size 8 --total-env-steps 80000 --seeds 0 1 2 \
+        --workers 4 --outdir outputs/paper/headline
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import matplotlib
@@ -23,19 +27,26 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from experience_routing.pipeline import OnlineTrainer, PipelineConfig  # noqa: E402
-
-
 METRICS = ["mean_success", "worst_success", "best_success", "mean_return", "worst_return"]
 
 
-def run_one(router: str, n: int, steps: int, seed: int, budget_chunks: int) -> dict:
+def run_cell(router: str, n: int, steps: int, seed: int, budget_chunks: int,
+             episodes: int, eval_interval: int) -> dict:
+    # single-threaded torch so N workers fit on N cores without contention
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    import torch
+
+    torch.set_num_threads(1)
+    from experience_routing.pipeline import OnlineTrainer, PipelineConfig
+
     cfg = PipelineConfig(
         population_size=n,
         total_env_steps=steps,
         router=router,
         seed=seed,
         budget_chunks=budget_chunks,
+        episodes_per_policy=episodes,
+        eval_interval=eval_interval,
         segmenter_fit_after=6_000,
         verbose=False,
     )
@@ -47,7 +58,7 @@ def run_one(router: str, n: int, steps: int, seed: int, budget_chunks: int) -> d
     row["routed_chunks_total"] = int(res["budget"].get("routed_chunks_total", 0))
     row["num_valid_experiences"] = int(len(res["experience_ids"]))
     row["wall_time"] = wall
-    return row
+    return {"router": router, "seed": seed, "row": row}
 
 
 def main() -> None:
@@ -55,9 +66,12 @@ def main() -> None:
     p.add_argument("--routers", nargs="+",
                    default=["no_share", "share_all", "random", "td_priority", "greedy", "uot"])
     p.add_argument("--population-size", type=int, default=8)
-    p.add_argument("--total-env-steps", type=int, default=120_000)
+    p.add_argument("--total-env-steps", type=int, default=80_000)
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--budget-chunks", type=int, default=32)
+    p.add_argument("--episodes", type=int, default=15)
+    p.add_argument("--eval-interval", type=int, default=20_000)
+    p.add_argument("--workers", type=int, default=4)
     p.add_argument("--outdir", default="outputs/paper/headline")
     args = p.parse_args()
 
@@ -65,38 +79,52 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     raw: dict[str, dict[int, dict]] = {r: {} for r in args.routers}
-    for router in args.routers:
-        for seed in args.seeds:
-            print(f"[sweep] router={router:12s} seed={seed} N={args.population_size} "
-                  f"steps={args.total_env_steps} ...", flush=True)
-            row = run_one(router, args.population_size, args.total_env_steps,
-                          seed, args.budget_chunks)
-            raw[router][seed] = row
-            print(f"        -> mean_success={row['mean_success']:.3f} "
-                  f"worst={row['worst_success']:.3f} "
-                  f"mean_return={row['mean_return']:.1f} "
-                  f"routed={row['routed_chunks_total']} "
+    cells = [(r, s) for r in args.routers for s in args.seeds]
+    print(f"[sweep] {len(cells)} cells, {args.workers} workers, "
+          f"N={args.population_size}, steps={args.total_env_steps}, "
+          f"seeds={args.seeds}", flush=True)
+
+    t_start = time.time()
+    with ProcessPoolExecutor(max_workers=args.workers) as ex:
+        futs = {
+            ex.submit(run_cell, r, args.population_size, args.total_env_steps, s,
+                      args.budget_chunks, args.episodes, args.eval_interval): (r, s)
+            for (r, s) in cells
+        }
+        done = 0
+        for fut in as_completed(futs):
+            r, s = futs[fut]
+            res = fut.result()
+            raw[res["router"]][res["seed"]] = res["row"]
+            done += 1
+            row = res["row"]
+            print(f"[{done}/{len(cells)}] router={r:12s} seed={s} "
+                  f"mean_success={row['mean_success']:.3f} worst={row['worst_success']:.3f} "
+                  f"return={row['mean_return']:.1f} routed={row['routed_chunks_total']} "
                   f"({row['wall_time']:.0f}s)", flush=True)
-            # checkpoint after every run so a crash keeps partial results
             (out / "raw.json").write_text(json.dumps(raw, indent=2, default=float))
+    print(f"[sweep] all cells done in {time.time() - t_start:.0f}s", flush=True)
 
     # aggregate mean +/- std across seeds
     agg: dict[str, dict] = {}
     for router in args.routers:
         rows = list(raw[router].values())
+        if not rows:
+            continue
         agg[router] = {}
         for m in METRICS + ["routing_time", "routed_chunks_total", "num_valid_experiences"]:
             vals = np.array([r[m] for r in rows], dtype=float)
             agg[router][m] = {"mean": float(vals.mean()), "std": float(vals.std())}
     (out / "aggregate.json").write_text(json.dumps(agg, indent=2, default=float))
 
-    # CSV for the paper table
     lines = ["router,seeds,mean_success,mean_success_std,worst_success,worst_success_std,"
              "mean_return,mean_return_std,routed_chunks,routing_time_s"]
     for router in args.routers:
+        if router not in agg:
+            continue
         a = agg[router]
         lines.append(
-            f"{router},{len(args.seeds)},"
+            f"{router},{len(raw[router])},"
             f"{a['mean_success']['mean']:.4f},{a['mean_success']['std']:.4f},"
             f"{a['worst_success']['mean']:.4f},{a['worst_success']['std']:.4f},"
             f"{a['mean_return']['mean']:.3f},{a['mean_return']['std']:.3f},"
@@ -104,8 +132,7 @@ def main() -> None:
         )
     (out / "table.csv").write_text("\n".join(lines) + "\n")
 
-    # bar chart: mean & worst success with std error bars
-    routers = args.routers
+    routers = [r for r in args.routers if r in agg]
     x = np.arange(len(routers))
     ms = [agg[r]["mean_success"]["mean"] for r in routers]
     ms_e = [agg[r]["mean_success"]["std"] for r in routers]
