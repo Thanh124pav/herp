@@ -1,0 +1,30 @@
+{
+  "no_share": {
+    "final_best_mean": 0.3333333333333333,
+    "final_best_std": 0.04714045207910318,
+    "auc_best": 0.24074074074074073,
+    "steps_to_threshold_mean": 42666.666666666664,
+    "seeds_reached_threshold": "3/3"
+  },
+  "share_all": {
+    "final_best_mean": 0.4166666666666667,
+    "final_best_std": 0.02357022603955158,
+    "auc_best": 0.24537037037037035,
+    "steps_to_threshold_mean": 45333.333333333336,
+    "seeds_reached_threshold": "3/3"
+  },
+  "greedy": {
+    "final_best_mean": 0.45,
+    "final_best_std": 0.08164965809277264,
+    "auc_best": 0.2324074074074074,
+    "steps_to_threshold_mean": 53333.333333333336,
+    "seeds_reached_threshold": "3/3"
+  },
+  "uot": {
+    "final_best_mean": 0.3,
+    "final_best_std": 0.07071067811865474,
+    "auc_best": 0.20370370370370372,
+    "steps_to_threshold_mean": 44000.0,
+    "seeds_reached_threshold": "2/3"
+  }
+}

@@ -50,7 +50,7 @@ def steps_to_threshold(steps_axis, best, thr):
 
 def auc(steps_axis, curve):
     # normalized area under the curve (mean success-weight over the run)
-    return float(np.trapz(curve, steps_axis) / (steps_axis[-1] - steps_axis[0]))
+    return float(np.trapezoid(curve, steps_axis) / (steps_axis[-1] - steps_axis[0]))
 
 
 def main():
