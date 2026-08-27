@@ -126,17 +126,21 @@ def main() -> None:
     fig_a6 = fig(D / "extras" / "ablation_budget.png",
                  "A6 — HERP success vs routing budget (chunks per interval, N=8).")
 
-    html = TEMPLATE.format(
-        full_line=full_line,
-        valid=full.get("num_valid_experiences", "—"),
-        routed=full.get("budget", {}).get("routed_chunks_total", "—"),
-        frac=comp.get("frac_experiences_distinct_best", 0),
-        bpe=bpe,
-        n_leaders=len(set(bpe)) if bpe else 0,
-        hrows=hrows, a5rows=a5rows or '<tr><td colspan="4" class="muted">pending</td></tr>',
-        a6rows=a6rows or '<tr><td colspan="4" class="muted">pending</td></tr>',
-        figs_full=figs_full, fig_head=fig_head, fig_a5=fig_a5, fig_a6=fig_a6,
-    )
+    subs = {
+        "full_line": full_line,
+        "valid": str(full.get("num_valid_experiences", "—")),
+        "routed": str(full.get("budget", {}).get("routed_chunks_total", "—")),
+        "frac": f'{comp.get("frac_experiences_distinct_best", 0):.3f}',
+        "bpe": str(bpe),
+        "n_leaders": str(len(set(bpe)) if bpe else 0),
+        "hrows": hrows,
+        "a5rows": a5rows or '<tr><td colspan="4" class="muted">pending</td></tr>',
+        "a6rows": a6rows or '<tr><td colspan="4" class="muted">pending</td></tr>',
+        "figs_full": figs_full, "fig_head": fig_head, "fig_a5": fig_a5, "fig_a6": fig_a6,
+    }
+    html = TEMPLATE
+    for k, v in subs.items():
+        html = html.replace("@@" + k + "@@", v)
     Path(args.out).write_text(html)
     print(f"report written to {args.out} ({len(html)//1024} KB)")
 
@@ -254,18 +258,18 @@ code{font-family:"IBM Plex Mono",monospace;font-size:.88em;background:var(--surf
 <p>Six routers on a matched budget (same N, same 80k total interactions = 10k/policy, same routing bandwidth), 3 seeds each: independent, share-all, random, SUPER-style TD priority, greedy best-donor, and the full UOT method (HERP). The QMP-style receiver-Q baseline (B5) is an interface hook only and was not run. Fair-budget accounting sums interactions across the population.</p>
 
 <h2>Experiment 1 — Complementary experience emerges (Gate B/C)</h2>
-<p>The full UOT run discovers a dynamic experience vocabulary, keeps <strong>{valid} valid experiences</strong> through the success-support filter, and routes <strong>{routed} chunks</strong>. The competence matrix is complementary: <code>best_policy_per_experience = {bpe}</code> — <strong>{n_leaders} different policies</strong> each lead on some experience (fraction distinct-best = {frac:.3f} &gt; 1/8). That clears <strong>Gate C</strong>, the local comparative advantage the routing hypothesis needs. Full-method population at 80k: {full_line}.</p>
-{figs_full}
+<p>The full UOT run discovers a dynamic experience vocabulary, keeps <strong>@@valid@@ valid experiences</strong> through the success-support filter, and routes <strong>@@routed@@ chunks</strong>. The competence matrix is complementary: <code>best_policy_per_experience = @@bpe@@</code> — <strong>@@n_leaders@@ different policies</strong> each lead on some experience (fraction distinct-best = {frac:.3f} &gt; 1/8). That clears <strong>Gate C</strong>, the local comparative advantage the routing hypothesis needs. Full-method population at 80k: @@full_line@@.</p>
+@@figs_full@@
 
 <h2>Experiment 4 — Routing comparison (headline)</h2>
 <div class="tablewrap"><table>
 <caption>N=8 · 80k env steps · 3 seeds · mean±std. Green = column leader. Success in %.</caption>
 <thead><tr><th>Router</th><th>Mean success</th><th>Worst-policy</th><th>Mean return</th><th>Routed chunks</th></tr></thead>
 <tbody>
-{hrows}
+@@hrows@@
 </tbody></table></div>
 <p>Independent training leads on both mean and worst-policy success. Indiscriminate and priority sharing (<code>random</code>, <code>td_priority</code>) depress the weakest policy toward zero; experience-level routing (<code>greedy</code>, <code>uot</code>) holds mean success near baseline but pays a clear <em>return</em> penalty from off-policy routed replay. UOT posts the best mean success but the <em>worst</em> worst-policy success — the opposite of the hypothesis's promise.</p>
-{fig_head}
+@@fig_head@@
 
 <h2>Experiment 5 — Ablations</h2>
 <h3>A5 · Population size (per-policy budget matched)</h3>
@@ -273,16 +277,16 @@ code{font-family:"IBM Plex Mono",monospace;font-size:.88em;background:var(--surf
 <caption>UOT routing vs N ∈ {{2,4,8}}, per-policy budget held at 10k. Success in %.</caption>
 <thead><tr><th class="num">N</th><th>Mean success</th><th>Worst-policy</th><th>Frac distinct-best</th></tr></thead>
 <tbody>
-{a5rows}
+@@a5rows@@
 </tbody></table></div>
 <h3>A6 · Routing budget (N=8)</h3>
 <div class="tablewrap"><table>
 <caption>UOT routing vs chunks routed per interval. Success in %.</caption>
 <thead><tr><th class="num">Budget</th><th>Mean success</th><th>Worst-policy</th><th>Routed chunks</th></tr></thead>
 <tbody>
-{a6rows}
+@@a6rows@@
 </tbody></table></div>
-<div class="figgrid">{fig_a5}{fig_a6}</div>
+<div class="figgrid">@@fig_a5@@@@fig_a6@@</div>
 
 <h2>Reading &amp; caveats for the paper</h2>
 <ul>
