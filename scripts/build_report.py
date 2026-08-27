@@ -48,6 +48,7 @@ def main() -> None:
     full = load(D / "full" / "synthetic_uot_seed0" / "metrics.json") or {}
     pop = load(D / "extras" / "ablation_popsize.json") or {}
     bud = load(D / "extras" / "ablation_budget.json") or {}
+    champ = load(D / "champion" / "champion_summary.json") or {}
 
     ROUTER_LABEL = {
         "no_share": "B1 · Independent (no_share)",
@@ -126,6 +127,28 @@ def main() -> None:
     fig_a6 = fig(D / "extras" / "ablation_budget.png",
                  "A6 — HERP success vs routing budget (chunks per interval, N=8).")
 
+    # champion rows (best-policy objective)
+    CH_LABEL = {"no_share": "Independent (no_share)", "share_all": "Shared replay (share_all)",
+                "greedy": "Greedy best-donor", "uot": "UOT (HERP)"}
+    ch_order = [r for r in ["no_share", "share_all", "greedy", "uot"] if r in champ]
+    best_ceiling = max((champ[r]["final_best_mean"] for r in ch_order), default=0)
+    chrows = ""
+    for r in ch_order:
+        c = champ[r]
+        lead = " lead" if abs(c["final_best_mean"] - best_ceiling) < 1e-9 else ""
+        stt = c.get("steps_to_threshold_mean")
+        stt_s = f'{stt/1000:.0f}k' if stt else "—"
+        chrows += (
+            f'<tr class="{"herp" if r in ("greedy","uot") else ""}">'
+            f'<td class="rl">{CH_LABEL[r]}</td>'
+            f'<td class="num{lead}">{pct(c["final_best_mean"])}<span class="sd">±{pct(c["final_best_std"])}</span></td>'
+            f'<td class="num">{stt_s}</td>'
+            f'<td class="num">{c.get("seeds_reached_threshold","—")}</td></tr>\n'
+        )
+    fig_champ = fig(D / "champion" / "champion_curve.png",
+                    "Champion (best-policy) success over env steps, N=8, 3 seeds (mean±std). "
+                    "Greedy reaches the highest ceiling but later; no_share is faster but lower.")
+
     subs = {
         "full_line": full_line,
         "valid": str(full.get("num_valid_experiences", "—")),
@@ -137,6 +160,8 @@ def main() -> None:
         "a5rows": a5rows or '<tr><td colspan="4" class="muted">pending</td></tr>',
         "a6rows": a6rows or '<tr><td colspan="4" class="muted">pending</td></tr>',
         "figs_full": figs_full, "fig_head": fig_head, "fig_a5": fig_a5, "fig_a6": fig_a6,
+        "chrows": chrows or '<tr><td colspan="4" class="muted">not run</td></tr>',
+        "fig_champ": fig_champ,
     }
     html = TEMPLATE
     for k, v in subs.items():
@@ -233,7 +258,7 @@ code{font-family:"IBM Plex Mono",monospace;font-size:.88em;background:var(--surf
 <div class="wrap">
 <span class="eyebrow">Results memo · MVP</span>
 <h1>Receiver-aware experience routing in a policy population</h1>
-<p class="lede">Does routing functional experience from strong donors to weak receivers beat independent learning? The pipeline works end-to-end and complementary competence emerges — but at MVP scale, routing does not yet improve performance.</p>
+<p class="lede">Does routing functional experience from strong donors to weak receivers beat independent learning? The pipeline works end-to-end and complementary competence emerges. At the population mean, routing does not yet win — but for a best-model objective, greedy best-donor routing forges a stronger champion.</p>
 <div class="byline">
   <span>Synthetic pick-and-place · CPU</span><span>SAC · N=8 · 3 seeds</span><span>80k env steps (10k/policy)</span>
 </div>
@@ -270,6 +295,19 @@ code{font-family:"IBM Plex Mono",monospace;font-size:.88em;background:var(--surf
 </tbody></table></div>
 <p>Independent training leads on both mean and worst-policy success. Indiscriminate and priority sharing (<code>random</code>, <code>td_priority</code>) depress the weakest policy toward zero; experience-level routing (<code>greedy</code>, <code>uot</code>) holds mean success near baseline but pays a clear <em>return</em> penalty from off-policy routed replay. UOT posts the best mean success but the <em>worst</em> worst-policy success — the opposite of the hypothesis's promise.</p>
 @@fig_head@@
+
+<h2>Champion objective — best model through competition + learning</h2>
+<p>The population mean is not the only objective. If the goal is the single <em>best</em> model, forged by letting policies learn from one another, the relevant metric is the best-policy success — and the story flips. Below, the champion at 80k and how fast it crosses a 0.30 success threshold.</p>
+<div class="tablewrap"><table>
+<caption>Best-policy (champion) success · N=8 · 3 seeds · fine eval (8k). Green = highest ceiling.</caption>
+<thead><tr><th>Population</th><th>Champion success</th><th>Steps→0.30</th><th>Seeds reaching 0.30</th></tr></thead>
+<tbody>
+@@chrows@@
+</tbody></table></div>
+<div class="callout">
+<strong>For a best-model objective, selective sharing helps.</strong> Greedy best-donor routing forges the strongest champion (≈0.45 vs 0.33 independent, +35% relative) and share-all also beats independent — competition plus learning-from-others does produce a better single model. The trade-off is speed: greedy invests early and overtakes late, crossing the threshold later than independent. Notably the tuned OT method (UOT) does <em>not</em> help the champion — OT balances the population, while greedy concentrates the best donor's experience into one rising policy. Caveat: 3 seeds, high variance (greedy ±0.08, one seed hit 0.55) — suggestive, not yet conclusive; a 5–10 seed confirmation is the natural next step.
+</div>
+@@fig_champ@@
 
 <h2>Experiment 5 — Ablations</h2>
 <h3>A5 · Population size (per-policy budget matched)</h3>
