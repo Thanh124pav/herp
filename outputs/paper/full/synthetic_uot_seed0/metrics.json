@@ -1,0 +1,78 @@
+{
+  "router": "uot",
+  "env": "synthetic",
+  "population_summary": {
+    "mean_success": 0.1875,
+    "worst_success": 0.1,
+    "best_success": 0.35,
+    "mean_return": -35.341097041473134,
+    "worst_return": -50.5210614801567,
+    "best_return": -19.13998568114763
+  },
+  "budget": {
+    "total_env_steps": 80000,
+    "per_policy_steps": {
+      "0": 10000,
+      "1": 10000,
+      "2": 10000,
+      "3": 10000,
+      "4": 10000,
+      "5": 10000,
+      "6": 10000,
+      "7": 10000
+    },
+    "routing_rounds": 16,
+    "routed_chunks_total": 165
+  },
+  "timing": {
+    "routing_time": 0.07790851593017578,
+    "eval_time": 6.8019256591796875
+  },
+  "num_experiences": 2033,
+  "num_valid_experiences": 4,
+  "complementarity": {
+    "num_experiences": 4,
+    "frac_experiences_distinct_best": 0.375,
+    "mean_frontier_gap": 0.01537378913096843,
+    "best_policy_per_experience": [
+      7,
+      5,
+      1,
+      1
+    ]
+  },
+  "final_eval": {
+    "0": {
+      "success_rate": 0.2,
+      "mean_return": -48.17329368803642
+    },
+    "1": {
+      "success_rate": 0.15,
+      "mean_return": -31.440679608085258
+    },
+    "2": {
+      "success_rate": 0.1,
+      "mean_return": -19.13998568114763
+    },
+    "3": {
+      "success_rate": 0.1,
+      "mean_return": -50.5210614801567
+    },
+    "4": {
+      "success_rate": 0.15,
+      "mean_return": -29.56908067249565
+    },
+    "5": {
+      "success_rate": 0.2,
+      "mean_return": -32.649992882964554
+    },
+    "6": {
+      "success_rate": 0.25,
+      "mean_return": -34.97163419071888
+    },
+    "7": {
+      "success_rate": 0.35,
+      "mean_return": -36.26304812817996
+    }
+  }
+}

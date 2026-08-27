@@ -1,0 +1,578 @@
+[
+  {
+    "kind": "popsize",
+    "n": 2,
+    "seed": 2,
+    "router": "uot",
+    "budget_chunks": 32,
+    "row": {
+      "mean_success": 0.13333333333333333,
+      "worst_success": 0.06666666666666667,
+      "best_success": 0.2,
+      "mean_return": -42.13315437103144,
+      "worst_return": -56.44937155186628,
+      "best_return": -27.816937190196594,
+      "routed_chunks_total": 34,
+      "num_valid_experiences": 8,
+      "complementarity": {
+        "num_experiences": 8,
+        "frac_experiences_distinct_best": 1.0,
+        "mean_frontier_gap": 6.840858262581462e-05,
+        "best_policy_per_experience": [
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    }
+  },
+  {
+    "kind": "popsize",
+    "n": 2,
+    "seed": 0,
+    "router": "uot",
+    "budget_chunks": 32,
+    "row": {
+      "mean_success": 0.3,
+      "worst_success": 0.26666666666666666,
+      "best_success": 0.3333333333333333,
+      "mean_return": -23.49217963975918,
+      "worst_return": -26.50987598419181,
+      "best_return": -20.474483295326543,
+      "routed_chunks_total": 8,
+      "num_valid_experiences": 4,
+      "complementarity": {
+        "num_experiences": 4,
+        "frac_experiences_distinct_best": 0.5,
+        "mean_frontier_gap": 0.03363375130616508,
+        "best_policy_per_experience": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    }
+  },
+  {
+    "kind": "popsize",
+    "n": 2,
+    "seed": 1,
+    "router": "uot",
+    "budget_chunks": 32,
+    "row": {
+      "mean_success": 0.2,
+      "worst_success": 0.13333333333333333,
+      "best_success": 0.26666666666666666,
+      "mean_return": -29.34213551059598,
+      "worst_return": -38.993176320411436,
+      "best_return": -19.691094700780525,
+      "routed_chunks_total": 47,
+      "num_valid_experiences": 2,
+      "complementarity": {
+        "num_experiences": 2,
+        "frac_experiences_distinct_best": 0.5,
+        "mean_frontier_gap": 0.0001493107370918456,
+        "best_policy_per_experience": [
+          0,
+          0
+        ]
+      }
+    }
+  },
+  {
+    "kind": "popsize",
+    "n": 4,
+    "seed": 0,
+    "router": "uot",
+    "budget_chunks": 32,
+    "row": {
+      "mean_success": 0.18333333333333335,
+      "worst_success": 0.06666666666666667,
+      "best_success": 0.3333333333333333,
+      "mean_return": -19.741695610718537,
+      "worst_return": -26.137755455529902,
+      "best_return": -17.09182374268554,
+      "routed_chunks_total": 140,
+      "num_valid_experiences": 6,
+      "complementarity": {
+        "num_experiences": 6,
+        "frac_experiences_distinct_best": 0.5,
+        "mean_frontier_gap": 0.023943042219429073,
+        "best_policy_per_experience": [
+          1,
+          1,
+          1,
+          1,
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "kind": "popsize",
+    "n": 4,
+    "seed": 2,
+    "router": "uot",
+    "budget_chunks": 32,
+    "row": {
+      "mean_success": 0.23333333333333334,
+      "worst_success": 0.06666666666666667,
+      "best_success": 0.4666666666666667,
+      "mean_return": -13.444562612394716,
+      "worst_return": -19.857064119606164,
+      "best_return": -5.7821439498501235,
+      "routed_chunks_total": 96,
+      "num_valid_experiences": 8,
+      "complementarity": {
+        "num_experiences": 8,
+        "frac_experiences_distinct_best": 0.75,
+        "mean_frontier_gap": 0.02152252671913546,
+        "best_policy_per_experience": [
+          2,
+          1,
+          3,
+          2,
+          2,
+          1,
+          1,
+          1
+        ]
+      }
+    }
+  },
+  {
+    "kind": "popsize",
+    "n": 4,
+    "seed": 1,
+    "router": "uot",
+    "budget_chunks": 32,
+    "row": {
+      "mean_success": 0.2,
+      "worst_success": 0.0,
+      "best_success": 0.3333333333333333,
+      "mean_return": -27.748860297709463,
+      "worst_return": -48.754810688649144,
+      "best_return": -14.681647762900552,
+      "routed_chunks_total": 99,
+      "num_valid_experiences": 12,
+      "complementarity": {
+        "num_experiences": 12,
+        "frac_experiences_distinct_best": 0.75,
+        "mean_frontier_gap": 0.02059528957692683,
+        "best_policy_per_experience": [
+          1,
+          0,
+          2,
+          0,
+          1,
+          2,
+          1,
+          1,
+          2,
+          0,
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "kind": "popsize",
+    "n": 8,
+    "seed": 0,
+    "router": "uot",
+    "budget_chunks": 32,
+    "row": {
+      "mean_success": 0.3,
+      "worst_success": 0.06666666666666667,
+      "best_success": 0.7333333333333333,
+      "mean_return": -17.616205167491216,
+      "worst_return": -36.65961069291765,
+      "best_return": -2.9139069204134382,
+      "routed_chunks_total": 178,
+      "num_valid_experiences": 4,
+      "complementarity": {
+        "num_experiences": 4,
+        "frac_experiences_distinct_best": 0.375,
+        "mean_frontier_gap": 0.023742423778389782,
+        "best_policy_per_experience": [
+          5,
+          0,
+          0,
+          4
+        ]
+      }
+    }
+  },
+  {
+    "kind": "popsize",
+    "n": 8,
+    "seed": 1,
+    "router": "uot",
+    "budget_chunks": 32,
+    "row": {
+      "mean_success": 0.2,
+      "worst_success": 0.0,
+      "best_success": 0.4666666666666667,
+      "mean_return": -28.164764375380127,
+      "worst_return": -49.05335398937681,
+      "best_return": -12.081379488191038,
+      "routed_chunks_total": 67,
+      "num_valid_experiences": 7,
+      "complementarity": {
+        "num_experiences": 7,
+        "frac_experiences_distinct_best": 0.5,
+        "mean_frontier_gap": 0.04106113289302556,
+        "best_policy_per_experience": [
+          7,
+          3,
+          7,
+          0,
+          0,
+          7,
+          1
+        ]
+      }
+    }
+  },
+  {
+    "kind": "popsize",
+    "n": 8,
+    "seed": 2,
+    "router": "uot",
+    "budget_chunks": 32,
+    "row": {
+      "mean_success": 0.21666666666666667,
+      "worst_success": 0.0,
+      "best_success": 0.4,
+      "mean_return": -15.970440286864694,
+      "worst_return": -34.936959532489595,
+      "best_return": -3.044900293714568,
+      "routed_chunks_total": 57,
+      "num_valid_experiences": 13,
+      "complementarity": {
+        "num_experiences": 13,
+        "frac_experiences_distinct_best": 0.5,
+        "mean_frontier_gap": 0.030962268986548327,
+        "best_policy_per_experience": [
+          0,
+          0,
+          7,
+          0,
+          0,
+          0,
+          7,
+          0,
+          7,
+          1,
+          5,
+          7,
+          5
+        ]
+      }
+    }
+  },
+  {
+    "kind": "budget",
+    "n": 8,
+    "seed": 0,
+    "router": "uot",
+    "budget_chunks": 8,
+    "row": {
+      "mean_success": 0.21666666666666667,
+      "worst_success": 0.0,
+      "best_success": 0.4666666666666667,
+      "mean_return": -11.157604436861543,
+      "worst_return": -25.353418583689056,
+      "best_return": -0.32583352455487347,
+      "routed_chunks_total": 6,
+      "num_valid_experiences": 5,
+      "complementarity": {
+        "num_experiences": 5,
+        "frac_experiences_distinct_best": 0.5,
+        "mean_frontier_gap": 0.026069058160575496,
+        "best_policy_per_experience": [
+          2,
+          1,
+          1,
+          6,
+          4
+        ]
+      }
+    }
+  },
+  {
+    "kind": "budget",
+    "n": 8,
+    "seed": 1,
+    "router": "uot",
+    "budget_chunks": 8,
+    "row": {
+      "mean_success": 0.26666666666666666,
+      "worst_success": 0.06666666666666667,
+      "best_success": 0.4666666666666667,
+      "mean_return": -11.235459027898454,
+      "worst_return": -19.77712754610959,
+      "best_return": -2.52859493296712,
+      "routed_chunks_total": 1,
+      "num_valid_experiences": 11,
+      "complementarity": {
+        "num_experiences": 11,
+        "frac_experiences_distinct_best": 0.625,
+        "mean_frontier_gap": 0.020056593007134804,
+        "best_policy_per_experience": [
+          3,
+          1,
+          0,
+          0,
+          3,
+          0,
+          3,
+          3,
+          7,
+          0,
+          4
+        ]
+      }
+    }
+  },
+  {
+    "kind": "budget",
+    "n": 8,
+    "seed": 2,
+    "router": "uot",
+    "budget_chunks": 8,
+    "row": {
+      "mean_success": 0.21666666666666667,
+      "worst_success": 0.0,
+      "best_success": 0.4,
+      "mean_return": -13.003032378210392,
+      "worst_return": -21.88844282906166,
+      "best_return": -1.5849636320229865,
+      "routed_chunks_total": 3,
+      "num_valid_experiences": 7,
+      "complementarity": {
+        "num_experiences": 7,
+        "frac_experiences_distinct_best": 0.625,
+        "mean_frontier_gap": 0.018871433191062676,
+        "best_policy_per_experience": [
+          7,
+          7,
+          3,
+          0,
+          3,
+          6,
+          4
+        ]
+      }
+    }
+  },
+  {
+    "kind": "budget",
+    "n": 8,
+    "seed": 0,
+    "router": "uot",
+    "budget_chunks": 32,
+    "row": {
+      "mean_success": 0.3,
+      "worst_success": 0.06666666666666667,
+      "best_success": 0.7333333333333333,
+      "mean_return": -17.616205167491216,
+      "worst_return": -36.65961069291765,
+      "best_return": -2.9139069204134382,
+      "routed_chunks_total": 178,
+      "num_valid_experiences": 4,
+      "complementarity": {
+        "num_experiences": 4,
+        "frac_experiences_distinct_best": 0.375,
+        "mean_frontier_gap": 0.023742423778389782,
+        "best_policy_per_experience": [
+          5,
+          0,
+          0,
+          4
+        ]
+      }
+    }
+  },
+  {
+    "kind": "budget",
+    "n": 8,
+    "seed": 1,
+    "router": "uot",
+    "budget_chunks": 32,
+    "row": {
+      "mean_success": 0.2,
+      "worst_success": 0.0,
+      "best_success": 0.4666666666666667,
+      "mean_return": -28.164764375380127,
+      "worst_return": -49.05335398937681,
+      "best_return": -12.081379488191038,
+      "routed_chunks_total": 67,
+      "num_valid_experiences": 7,
+      "complementarity": {
+        "num_experiences": 7,
+        "frac_experiences_distinct_best": 0.5,
+        "mean_frontier_gap": 0.04106113289302556,
+        "best_policy_per_experience": [
+          7,
+          3,
+          7,
+          0,
+          0,
+          7,
+          1
+        ]
+      }
+    }
+  },
+  {
+    "kind": "budget",
+    "n": 8,
+    "seed": 2,
+    "router": "uot",
+    "budget_chunks": 32,
+    "row": {
+      "mean_success": 0.21666666666666667,
+      "worst_success": 0.0,
+      "best_success": 0.4,
+      "mean_return": -15.970440286864694,
+      "worst_return": -34.936959532489595,
+      "best_return": -3.044900293714568,
+      "routed_chunks_total": 57,
+      "num_valid_experiences": 13,
+      "complementarity": {
+        "num_experiences": 13,
+        "frac_experiences_distinct_best": 0.5,
+        "mean_frontier_gap": 0.030962268986548327,
+        "best_policy_per_experience": [
+          0,
+          0,
+          7,
+          0,
+          0,
+          0,
+          7,
+          0,
+          7,
+          1,
+          5,
+          7,
+          5
+        ]
+      }
+    }
+  },
+  {
+    "kind": "budget",
+    "n": 8,
+    "seed": 1,
+    "router": "uot",
+    "budget_chunks": 128,
+    "row": {
+      "mean_success": 0.33333333333333337,
+      "worst_success": 0.13333333333333333,
+      "best_success": 0.6666666666666666,
+      "mean_return": -18.8450718736292,
+      "worst_return": -27.348074348736585,
+      "best_return": -9.228007584893277,
+      "routed_chunks_total": 933,
+      "num_valid_experiences": 12,
+      "complementarity": {
+        "num_experiences": 12,
+        "frac_experiences_distinct_best": 0.75,
+        "mean_frontier_gap": 0.023077230112669395,
+        "best_policy_per_experience": [
+          1,
+          2,
+          3,
+          0,
+          4,
+          0,
+          3,
+          7,
+          0,
+          1,
+          0,
+          7
+        ]
+      }
+    }
+  },
+  {
+    "kind": "budget",
+    "n": 8,
+    "seed": 0,
+    "router": "uot",
+    "budget_chunks": 128,
+    "row": {
+      "mean_success": 0.2833333333333333,
+      "worst_success": 0.13333333333333333,
+      "best_success": 0.5333333333333333,
+      "mean_return": -17.476094410959686,
+      "worst_return": -40.03663905737701,
+      "best_return": -5.243215875974854,
+      "routed_chunks_total": 989,
+      "num_valid_experiences": 5,
+      "complementarity": {
+        "num_experiences": 5,
+        "frac_experiences_distinct_best": 0.5,
+        "mean_frontier_gap": 0.009323369867684405,
+        "best_policy_per_experience": [
+          6,
+          1,
+          7,
+          4,
+          1
+        ]
+      }
+    }
+  },
+  {
+    "kind": "budget",
+    "n": 8,
+    "seed": 2,
+    "router": "uot",
+    "budget_chunks": 128,
+    "row": {
+      "mean_success": 0.19166666666666668,
+      "worst_success": 0.06666666666666667,
+      "best_success": 0.3333333333333333,
+      "mean_return": -20.135944374820617,
+      "worst_return": -35.185695975317664,
+      "best_return": -8.647043267188682,
+      "routed_chunks_total": 1011,
+      "num_valid_experiences": 16,
+      "complementarity": {
+        "num_experiences": 16,
+        "frac_experiences_distinct_best": 0.75,
+        "mean_frontier_gap": 0.042589530767203926,
+        "best_policy_per_experience": [
+          5,
+          3,
+          6,
+          6,
+          3,
+          3,
+          0,
+          0,
+          0,
+          1,
+          6,
+          6,
+          3,
+          7,
+          3,
+          1
+        ]
+      }
+    }
+  }
+]
