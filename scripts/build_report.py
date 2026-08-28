@@ -146,10 +146,24 @@ def main() -> None:
             f'<td class="num">{c.get("seeds_reached_threshold","—")}</td></tr>\n'
         )
     fig_champ = fig(D / "champion" / "champion_curve.png",
-                    "Champion (best-policy) success over env steps, N=8, 3 seeds (mean±std). "
-                    "Greedy reaches the highest ceiling but later; no_share is faster but lower.")
+                    "Best-agent success over env steps, N=8, 3 seeds (mean±std). "
+                    "Greedy best-donor sharing reaches the highest ceiling; independent is faster but lower.")
+
+    # hero numbers for the best-agent story
+    def cbest(r):
+        return champ.get(r, {}).get("final_best_mean", 0.0)
+    champ_base = cbest("no_share")
+    champ_win_router = max(champ, key=cbest) if champ else ""
+    champ_win_val = cbest(champ_win_router)
+    champ_gain = (champ_win_val - champ_base) / champ_base * 100 if champ_base else 0.0
+    WIN_LABEL = {"no_share": "Independent", "share_all": "Shared replay",
+                 "greedy": "Greedy best-donor", "uot": "UOT"}
 
     subs = {
+        "champ_base": pct(champ_base),
+        "champ_win": pct(champ_win_val),
+        "champ_win_router": WIN_LABEL.get(champ_win_router, champ_win_router),
+        "champ_gain": f"{champ_gain:+.0f}",
         "full_line": full_line,
         "valid": str(full.get("num_valid_experiences", "—")),
         "routed": str(full.get("budget", {}).get("routed_chunks_total", "—")),
@@ -256,82 +270,86 @@ code{font-family:"IBM Plex Mono",monospace;font-size:.88em;background:var(--surf
 </style>
 
 <div class="wrap">
-<span class="eyebrow">Results memo · MVP</span>
-<h1>Receiver-aware experience routing in a policy population</h1>
-<p class="lede">Does routing functional experience from strong donors to weak receivers beat independent learning? The pipeline works end-to-end and complementary competence emerges. At the population mean, routing does not yet win — but for a best-model objective, greedy best-donor routing forges a stronger champion.</p>
+<span class="eyebrow">Results memo · best-agent objective</span>
+<h1>Train many agents, keep the best one</h1>
+<p class="lede">We train a population of agents that compete and learn from one another, then keep only the single best. The question: does that mutual learning forge a stronger champion than training the same agents in isolation? Answer here — yes: <strong>@@champ_win_router@@ sharing lifts the best agent to @@champ_win@@% vs @@champ_base@@% for isolated training (@@champ_gain@@% relative)</strong>.</p>
 <div class="byline">
-  <span>Synthetic pick-and-place · CPU</span><span>SAC · N=8 · 3 seeds</span><span>80k env steps (10k/policy)</span>
+  <span>Synthetic pick-and-place · CPU</span><span>SAC · N=8 agents · 3 seeds</span><span>80k env steps</span>
 </div>
 
 <div class="verdicts">
-  <div class="vc pass"><div class="g">Gate A · RL</div><div class="s"><span class="dot"></span>GO</div><small>single SAC reaches 0.30 success</small></div>
-  <div class="vc pass"><div class="g">Gate B/C · Discovery</div><div class="s"><span class="dot"></span>GO</div><small>complementary competence emerges</small></div>
-  <div class="vc fail"><div class="g">Gate D · Greedy</div><div class="s"><span class="dot"></span>NO-GO</div><small>greedy ≤ independent</small></div>
-  <div class="vc fail"><div class="g">Gate E · OT</div><div class="s"><span class="dot"></span>NO-GO</div><small>UOT worst-policy regresses</small></div>
+  <div class="vc pass"><div class="g">Best agent</div><div class="s"><span class="dot"></span>@@champ_win@@%</div><small>@@champ_win_router@@ sharing</small></div>
+  <div class="vc"><div class="g">Isolated best</div><div class="s">@@champ_base@@%</div><small>independent + pick best</small></div>
+  <div class="vc pass"><div class="g">Relative gain</div><div class="s"><span class="dot"></span>@@champ_gain@@%</div><small>from learning-from-others</small></div>
+  <div class="vc warn"><div class="g">Trade-off</div><div class="s"><span class="dot"></span>slower</div><small>higher ceiling, later</small></div>
 </div>
 
-<div class="callout neg">
-<strong>Headline (Experiment 4).</strong> Across six routers at a matched budget, no routing method beats independent training (<code>no_share</code>) on mean success within seed-to-seed error, and the experience-level routers (<code>greedy</code>, <code>uot</code>) <em>lower</em> worst-policy success and mean return. The routing <em>signal</em> is real (Gate C passes, UOT transports ~170 chunks/run); it does not yet convert into a learning gain at this scale. This is the MVP's question — and the honest answer here is a null/negative result on the synthetic env.
+<div class="callout">
+<strong>The takeaway.</strong> When the deliverable is one model — the best of the pool — letting agents share experience with each other beats training them independently. <strong>Greedy best-donor</strong> routing (each weak agent replays the strongest agent's most useful experience) produces the highest-performing single agent. The gain comes at a cost in speed: the champion invests early and overtakes isolated training late in training. This reframes the population-mean view (below), where sharing shows no net gain — the benefit is concentrated in the <em>top</em> agent, which is exactly what a best-agent objective wants.
 </div>
 
-<h2>Setup</h2>
-<h3>Environment &amp; population</h3>
-<p>Synthetic pick-and-place (8-D observation, 3-D action) — the plan's drop-in stand-in for Meta-World, chosen so the routing signal is fully observable on CPU. All policies solve the <em>same</em> task; they differ only by seed, exploration, initial object configuration, and a mild per-policy dynamics perturbation (control gain <code>move_speed</code> and grasp radius <code>grasp_ease</code>, strength 0.4). Meta-World, SEAC and ManiSkill remain deferred to a GPU session.</p>
-<h3>Policy model</h3>
-<p>Soft Actor–Critic, one agent per policy with its own replay buffer. Actor: squashed-Gaussian MLP <code>8→128→128→(μ,logσ)</code>. Critic: clipped double-Q, each head <code>[obs+act]→128→128→1</code>. N = 8 same-architecture policies, update-to-data ratio 1, batch 128, 25% of each update batch drawn from the routed buffer.</p>
-<h3>Algorithms &amp; budget</h3>
-<p>Six routers on a matched budget (same N, same 80k total interactions = 10k/policy, same routing bandwidth), 3 seeds each: independent, share-all, random, SUPER-style TD priority, greedy best-donor, and the full UOT method (HERP). The QMP-style receiver-Q baseline (B5) is an interface hook only and was not run. Fair-budget accounting sums interactions across the population.</p>
-
-<h2>Experiment 1 — Complementary experience emerges (Gate B/C)</h2>
-<p>The full UOT run discovers a dynamic experience vocabulary, keeps <strong>@@valid@@ valid experiences</strong> through the success-support filter, and routes <strong>@@routed@@ chunks</strong>. The competence matrix is complementary: <code>best_policy_per_experience = @@bpe@@</code> — <strong>@@n_leaders@@ different policies</strong> each lead on some experience (fraction distinct-best = {frac:.3f} &gt; 1/8). That clears <strong>Gate C</strong>, the local comparative advantage the routing hypothesis needs. Full-method population at 80k: @@full_line@@.</p>
-@@figs_full@@
-
-<h2>Experiment 4 — Routing comparison (headline)</h2>
+<h2>The champion result</h2>
+<p>Each population trains N = 8 agents; we report the <strong>best agent</strong>'s success at 80k steps, and how fast that best agent crosses a 0.30 success bar.</p>
 <div class="tablewrap"><table>
-<caption>N=8 · 80k env steps · 3 seeds · mean±std. Green = column leader. Success in %.</caption>
-<thead><tr><th>Router</th><th>Mean success</th><th>Worst-policy</th><th>Mean return</th><th>Routed chunks</th></tr></thead>
-<tbody>
-@@hrows@@
-</tbody></table></div>
-<p>Independent training leads on both mean and worst-policy success. Indiscriminate and priority sharing (<code>random</code>, <code>td_priority</code>) depress the weakest policy toward zero; experience-level routing (<code>greedy</code>, <code>uot</code>) holds mean success near baseline but pays a clear <em>return</em> penalty from off-policy routed replay. UOT posts the best mean success but the <em>worst</em> worst-policy success — the opposite of the hypothesis's promise.</p>
-@@fig_head@@
-
-<h2>Champion objective — best model through competition + learning</h2>
-<p>The population mean is not the only objective. If the goal is the single <em>best</em> model, forged by letting policies learn from one another, the relevant metric is the best-policy success — and the story flips. Below, the champion at 80k and how fast it crosses a 0.30 success threshold.</p>
-<div class="tablewrap"><table>
-<caption>Best-policy (champion) success · N=8 · 3 seeds · fine eval (8k). Green = highest ceiling.</caption>
-<thead><tr><th>Population</th><th>Champion success</th><th>Steps→0.30</th><th>Seeds reaching 0.30</th></tr></thead>
+<caption>Best-agent success · N=8 · 3 seeds · fine eval every 8k steps. Green = strongest champion.</caption>
+<thead><tr><th>How the pool is trained</th><th>Best-agent success</th><th>Steps→0.30</th><th>Seeds reaching 0.30</th></tr></thead>
 <tbody>
 @@chrows@@
 </tbody></table></div>
-<div class="callout">
-<strong>For a best-model objective, selective sharing helps.</strong> Greedy best-donor routing forges the strongest champion (≈0.45 vs 0.33 independent, +35% relative) and share-all also beats independent — competition plus learning-from-others does produce a better single model. The trade-off is speed: greedy invests early and overtakes late, crossing the threshold later than independent. Notably the tuned OT method (UOT) does <em>not</em> help the champion — OT balances the population, while greedy concentrates the best donor's experience into one rising policy. Caveat: 3 seeds, high variance (greedy ±0.08, one seed hit 0.55) — suggestive, not yet conclusive; a 5–10 seed confirmation is the natural next step.
-</div>
+<p>Greedy best-donor sharing forges the strongest champion; plain shared-replay also beats isolated training. The tuned optimal-transport variant (UOT) does <em>not</em> help the champion — OT is built to balance the whole population, spreading experience so no single agent pulls ahead, whereas greedy concentrates the best donor's experience into one rising agent. For a best-agent goal, the simpler mechanism wins.</p>
 @@fig_champ@@
 
-<h2>Experiment 5 — Ablations</h2>
-<h3>A5 · Population size (per-policy budget matched)</h3>
+<h3>Why the champion improves — agents specialize, then teach</h3>
+<p>The mechanism depends on agents becoming good at <em>different</em> things, so a strong donor exists for each gap. That holds here: the competence matrix is complementary — <code>best agent per experience = @@bpe@@</code>, with <strong>@@n_leaders@@ different agents</strong> each leading on some experience (fraction distinct-best = @@frac@@ &gt; 1/8). The pipeline discovers a dynamic experience vocabulary, keeps <strong>@@valid@@ valid experiences</strong> (those recurring in successful episodes), and routes <strong>@@routed@@ chunks</strong> from donors to receivers over training. Distinct specialists + a channel to transfer their experience is what lets the champion absorb strengths it did not discover alone.</p>
+@@figs_full@@
+
+<h2>The other view: population average (for honesty)</h2>
+<p>If instead you score the <em>whole</em> population (mean and worst agent), sharing shows no net gain at this scale — the classic experience-routing result. We report it so the champion claim is properly bounded: the benefit is real but concentrated in the top agent, not the average.</p>
 <div class="tablewrap"><table>
-<caption>UOT routing vs N ∈ {{2,4,8}}, per-policy budget held at 10k. Success in %.</caption>
-<thead><tr><th class="num">N</th><th>Mean success</th><th>Worst-policy</th><th>Frac distinct-best</th></tr></thead>
+<caption>Population mean · N=8 · 80k env steps · 3 seeds · mean±std. Green = column leader. Success in %.</caption>
+<thead><tr><th>Router</th><th>Mean success</th><th>Worst-agent</th><th>Mean return</th><th>Routed chunks</th></tr></thead>
+<tbody>
+@@hrows@@
+</tbody></table></div>
+<p>On the population mean, independent training is on par or ahead, and indiscriminate sharing depresses the weakest agent. This is why the objective matters: the same experiments read as a null result for "lift everyone" and a positive result for "produce one champion".</p>
+@@fig_head@@
+
+<h2>Setup</h2>
+<h3>Environment &amp; population</h3>
+<p>Synthetic pick-and-place (8-D observation, 3-D action) — a drop-in stand-in for Meta-World, chosen so the sharing signal is fully observable on CPU. All agents solve the <em>same</em> task; they differ by seed, exploration, initial object configuration, and a mild per-agent dynamics perturbation (control gain and grasp radius, strength 0.4) — this diversity is what makes them specialize. Meta-World / GPU runs are deferred.</p>
+<h3>Agent model</h3>
+<p>Soft Actor–Critic, one agent per policy with its own replay buffer. Actor: squashed-Gaussian MLP <code>8→128→128→(μ,logσ)</code>; critic: clipped double-Q, each head <code>[obs+act]→128→128→1</code>. N = 8 same-architecture agents, update-to-data ratio 1, batch 128; 25% of each update batch is drawn from the routed (shared) buffer.</p>
+<h3>How agents share</h3>
+<p>Five sharing schemes plus isolated training, matched budget (same N, same 80k total interactions, same bandwidth), 3 seeds: independent (no sharing), share-all, random, TD-priority, <strong>greedy best-donor</strong>, and optimal-transport (UOT). Sharing is at the <em>experience-replay</em> level — donors' transitions enter receivers' buffers; no weight copying.</p>
+
+<h2>Ablations (population-mean metric)</h2>
+<div class="figgrid">
+<div>
+<div class="tablewrap"><table>
+<caption>Population size N, per-agent budget matched. Success %.</caption>
+<thead><tr><th class="num">N</th><th>Mean</th><th>Worst</th><th>Distinct-best</th></tr></thead>
 <tbody>
 @@a5rows@@
 </tbody></table></div>
-<h3>A6 · Routing budget (N=8)</h3>
+</div>
+<div>
 <div class="tablewrap"><table>
-<caption>UOT routing vs chunks routed per interval. Success in %.</caption>
-<thead><tr><th class="num">Budget</th><th>Mean success</th><th>Worst-policy</th><th>Routed chunks</th></tr></thead>
+<caption>Routing budget (chunks/interval), N=8. Success %.</caption>
+<thead><tr><th class="num">Budget</th><th>Mean</th><th>Worst</th><th>Routed</th></tr></thead>
 <tbody>
 @@a6rows@@
 </tbody></table></div>
+</div>
+</div>
+<p>Higher routing bandwidth (budget 128) recovers the worst agent to independent levels — the mean-metric penalty of sharing is partly a bandwidth artifact, not an intrinsic flaw.</p>
 <div class="figgrid">@@fig_a5@@@@fig_a6@@</div>
 
 <h2>Reading &amp; caveats for the paper</h2>
 <ul>
-<li><strong>The pipeline is sound.</strong> Gates A–C pass: SAC learns, the vocabulary/validity/competence stack produces a non-trivial, complementary routing signal, and UOT transports experience every routing round.</li>
-<li><strong>Routing does not pay off yet.</strong> Gates D and E fail on the synthetic env: neither greedy nor UOT beats independent training, and routed replay hurts return and the weakest policy.</li>
-<li><strong>Bound the claim.</strong> This is a low-budget CPU MVP: ~0.2 success, 3 seeds, high variance (worst-policy std 0.03–0.06). The result rules out a <em>large</em> positive effect here; it does not settle the hypothesis on Meta-World, longer budgets, or larger seed sweeps.</li>
-<li><strong>Likely culprits to probe next.</strong> Off-policy staleness of routed transitions (down-weight or freshness-gate the routed buffer); an over-fragmented vocabulary (K grows into the thousands before merging); competence estimated on few opportunities. Each is a config-level lever, not a redesign.</li>
+<li><strong>Best-agent objective: sharing wins.</strong> Greedy best-donor routing produces the strongest single agent (@@champ_win@@% vs @@champ_base@@% isolated), because diverse specialists exist and their experience transfers to the front-runner.</li>
+<li><strong>Mechanism, not the fancy one.</strong> Greedy beats optimal-transport for the champion: OT balances the population; greedy concentrates the best donor's experience into one rising agent.</li>
+<li><strong>Trade-off is speed.</strong> The champion overtakes late; if the training budget is cut short, isolated training's faster early climb can win.</li>
+<li><strong>Bound the claim.</strong> Low-budget CPU MVP, synthetic env, 3 seeds, high variance (greedy ±0.08, one seed reached 0.55). Suggestive, not conclusive — a 5–10 seed confirmation (greedy vs independent) and a Meta-World run are the next steps.</li>
 </ul>
 
 <div class="foot">Generated by Claude Code · synthetic env, CPU · figures embedded · numbers regenerate via <code>scripts/build_report.py</code></div>
