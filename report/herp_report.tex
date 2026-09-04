@@ -80,6 +80,53 @@ The pipeline (PLAN.md \S15) is:
 \]
 
 %--------------------------------------------------------------------------
+\section{Environments: synthetic stand-in vs.\ official suite}
+\label{sec:envs}
+A key point for reading every number in this report: the runs were executed on a
+\emph{synthetic stand-in} environment, not on the official benchmark.
+
+\begin{itemize}\itemsep2pt
+  \item \textbf{Synthetic pick-and-place} (\code{envs/synthetic\_reacher.py}) is a
+        small, hand-written 2D reach--grasp--transport task with no physics
+        engine --- its dynamics are a few NumPy vector updates. It exists so the
+        \emph{entire} online loop and routing pipeline run on CPU in minutes, and
+        so the routing signal is fully observable and unit-tested. It is a
+        \emph{sandbox for validating the algorithm}, not a scientific benchmark.
+        All measured numbers below come from this environment.
+  \item \textbf{Meta-World} (\code{envs/metaworld\_env.py}) is the official
+        manipulation suite (Farama). It is implemented as a \emph{drop-in swap}
+        behind the same \code{BaseEnv}/\code{EnvSpec} interface, but its heavy
+        dependencies (MuJoCo, \code{metaworld}, \code{gymnasium}) are optional and
+        \textbf{not yet run} --- this is deferred to a GPU/local session.
+\end{itemize}
+
+\noindent The policies genuinely interact with the environment (a real online SAC
+loop: \code{reset}/\code{step}, transition collection, updates); the environment
+they currently interact with is simply the synthetic stand-in. Switching to the
+official suite is a one-line factory change; a ready-to-run local script is
+provided at \code{scripts/run\_metaworld\_local.sh}
+(Meta-World physics steps on CPU, so a modest GPU such as a GTX~1650 is more than
+enough for the tiny SAC networks).
+
+\begin{table}[h]
+\centering
+\caption{Synthetic stand-in vs.\ the official Meta-World suite.}
+\label{tab:envs}
+\small
+\begin{tabular}{L{3.4cm} L{5.1cm} L{5.1cm}}
+\toprule
+ & \textbf{Synthetic (used here)} & \textbf{Meta-World (deferred)} \\
+\midrule
+Physics        & None (NumPy vector updates) & MuJoCo \\
+Purpose        & Validate the routing pipeline & Publishable benchmark numbers \\
+Compute        & CPU, minutes & CPU physics + GPU nets, hours \\
+Dependencies   & numpy / scipy / POT only & + mujoco, metaworld, gymnasium \\
+Status         & \yes~Runs end-to-end & \wip~Drop-in, not yet run \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------------
 \section{Implementation status}
 \label{sec:status}
 Table~\ref{tab:status} maps each pipeline component to its implementation state.
