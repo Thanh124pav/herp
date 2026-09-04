@@ -1,0 +1,411 @@
+% !TEX program = pdflatex
+%
+% HERP -- Receiver-Aware Experience Routing: MVP experiments report.
+%
+% This report presents the experiment design, the stop/go gate outcomes, and the
+% measured results of the MVP implemented in this repository (see PLAN.md and
+% README.md, which are the project's technical notes).
+%
+% Build:  pdflatex herp_report.tex   (run twice for cross-references)
+% Dashboard figures (Section "Dashboard"): generate the PNGs with
+%   python scripts/run_full.py --env synthetic --population-size 4 --router uot
+% which writes them under outputs/<run>/, then copy them next to this file (or
+% point \graphicspath at outputs/<run>/) and uncomment the figure block.
+%
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=2.4cm]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{longtable}
+\usepackage[hidelinks]{hyperref}
+\usepackage{caption}
+\captionsetup{font=small,labelfont=bf}
+
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\yes}{\textcolor{green!55!black}{\checkmark}}
+\newcommand{\wip}{\textcolor{orange!85!black}{$\circ$}}
+\newcommand{\no}{\textcolor{red!70!black}{$\times$}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{\textbf{Receiver-Aware Experience Routing in Robot Policy Populations}\\[2pt]
+\large MVP Experiments Report (HERP)}
+\author{Project: \code{herp} / \code{experience\_routing}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This report summarises the experiment design and current empirical status of the
+Minimum Viable Product (MVP) for \emph{receiver-aware experience routing}. A
+population of independently learning SAC policies discovers complementary
+functional experiences; a router transports those experiences from strong
+\emph{donors} to weak \emph{receivers}. The MVP runs the full pipeline
+end-to-end on a fast synthetic pick-and-place environment (CPU). The heavy RL
+backbone and the Meta-World suite are wired as drop-in swaps for a later GPU
+session. The central question the MVP answers is \emph{whether the simple
+state-transition pipeline produces a non-trivial routing signal} --- and it
+does: complementary competence emerges (Gate~C passes) and the unbalanced
+optimal-transport (UOT) router transports experience over the discovered valid
+set. The headline numbers below are from the synthetic environment; the
+routing-comparison magnitudes on a real suite are pending a GPU run.
+\end{abstract}
+
+%--------------------------------------------------------------------------
+\section{Scientific claim under test}
+The MVP is designed to test one narrow, falsifiable claim (PLAN.md \S30):
+\begin{quote}\itshape
+A population can be organised into a dynamic functional-experience competence
+space; the resulting receiver deficits can be used to route experience from
+policies that have already mastered a functional transition to policies that
+have not, outperforming indiscriminate or globally prioritised experience
+sharing.
+\end{quote}
+The corresponding ablation hierarchy is
+\emph{Independent} $\rightarrow$ \emph{Shared / global-priority} $\rightarrow$
+\emph{Receiver deficit + greedy donor} $\rightarrow$ \emph{Receiver deficit +
+UOT}.
+
+The pipeline (PLAN.md \S15) is:
+\[
+\text{Parallel SAC}\to\text{segmentation}\to\text{experience grouping}\to
+\text{validity filter}\to\text{competence}\to\text{deficit}\to
+\text{router}\to\text{routed replay}\to\text{updates.}
+\]
+
+%--------------------------------------------------------------------------
+\section{Implementation status}
+\label{sec:status}
+Table~\ref{tab:status} maps each pipeline component to its implementation state.
+Everything needed to run the routing experiment on the synthetic environment is
+implemented and unit-tested; the real environment and dashboards are deferred to
+a GPU session behind the same interfaces.
+
+\begin{table}[h]
+\centering
+\caption{Component implementation status. \yes~implemented \quad
+\wip~interface/drop-in only \quad \no~deferred.}
+\label{tab:status}
+\small
+\begin{tabular}{L{9.5cm} c}
+\toprule
+\textbf{Component} & \textbf{Status} \\
+\midrule
+SAC backbone (PyTorch, CPU) & \yes \\
+Synthetic pick-and-place env (segmenter-ready state fields) & \yes \\
+Segmentation / grouping / validity / competence / deficit & \yes \\
+Routers: \code{no\_share}, \code{share\_all}, \code{random}, \code{td\_priority}, \code{greedy}, \code{uot} & \yes \\
+QMP-style receiver-Q selection (B5) & \wip \\
+Meta-World adapter (\code{envs/metaworld\_env.py}) & \wip \\
+Meta-World convergence runs, SEAC, ManiSkill, WandB dashboards & \no \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------------
+\section{Baselines and the proposed method}
+Table~\ref{tab:baselines} lists the comparison arms (PLAN.md \S17). All
+population methods are compared under a \emph{matched total
+environment-interaction budget}, matched architecture, update count, and
+routing bandwidth (PLAN.md \S20).
+
+\begin{table}[h]
+\centering
+\caption{Required baselines B0--B7 and their scientific purpose.}
+\label{tab:baselines}
+\small
+\begin{tabular}{c L{4.2cm} L{7.6cm}}
+\toprule
+\textbf{ID} & \textbf{Method} & \textbf{Question it isolates} \\
+\midrule
+B0 & Single SAC & Does a population help at all (matched total budget)? \\
+B1 & Independent population & Routing gains vs.\ pure parallel exploration. \\
+B2 & Shared replay / share-all & Is selective routing better than aggregating all data? \\
+B3 & Random routing & Is the routing \emph{decision} meaningful, or is any cross-policy data enough? \\
+B4 & TD-priority (SUPER-style) & Receiver-specific deficit vs.\ global experience importance. \\
+B5 & QMP-style receiver-Q & Experience routing vs.\ receiver-side behaviour selection. \\
+B6 & Greedy best-donor routing & Does OT add anything beyond obvious donor matching? \\
+B7 & \textbf{UOT experience routing (full method)} & The proposed method. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------------
+\section{Stop/Go gate outcomes}
+The project is governed by explicit go/no-go gates (PLAN.md \S25).
+Table~\ref{tab:gates} records the current outcome of each.
+
+\begin{table}[h]
+\centering
+\caption{MVP stop/go gates and current outcome on the synthetic environment.}
+\label{tab:gates}
+\small
+\begin{tabular}{c L{7.3cm} L{4.4cm}}
+\toprule
+\textbf{Gate} & \textbf{Criterion} & \textbf{Outcome} \\
+\midrule
+A & Single SAC reliably learns the task & \yes~Pass \\
+B & Vocabulary does not explode; clusters have repeated support & \yes~Pass (6 valid experiences) \\
+C & Different policies strongest on a non-trivial set of experiences & \yes~Pass (see Table~\ref{tab:complementarity}) \\
+D & Greedy deficit routing improves over independent / share-all & \wip~Positive but small (synthetic) \\
+E & UOT improves over greedy, or gives a budget/robustness edge & \wip~Not yet decisive (synthetic) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textit{Reading of Gates D--E.} PLAN.md \S25 states explicitly that if
+greedy is as good as UOT, OT should be dropped rather than forced into the
+paper. On the current synthetic environment the routing signal is real but the
+\emph{magnitude} of the greedy-over-baseline and UOT-over-greedy gaps is small.
+This is consistent with a small, easy environment (few valid experiences, modest
+donor competence): greedy $\operatorname{argmax}$ nearly coincides with the OT
+solution when the complementarity structure is simple. Establishing decisive
+Gate~D/E magnitudes is the primary reason to run on Meta-World (harder task,
+larger deficits and higher-quality supply).
+
+%--------------------------------------------------------------------------
+\section{Headline result (synthetic environment)}
+Table~\ref{tab:headline} reports the measured end-to-end UOT run recorded in
+\code{README.md}. Numbers vary with seed; the point is that the simple pipeline
+produces a non-trivial routing signal, not a tuned performance figure.
+
+\begin{table}[h]
+\centering
+\caption{End-to-end UOT run on the synthetic pick-and-place environment,
+CPU. Configuration: \code{--total-env-steps 48000}, $N=4$, router \code{uot}.}
+\label{tab:headline}
+\small
+\begin{tabular}{L{8.8cm} r}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Population size $N$ & 4 \\
+Total environment steps & 48{,}000 \\
+Per-policy success rate (range across the 4 policies) & 0.13 -- 0.27 \\
+Discovered valid experiences (post success-support filter) & 6 \\
+Policies leading on $\geq 1$ experience (complementarity) & 3 of 4 \\
+Exemplar chunks transported donor$\to$receiver (UOT) & 117 \\
+UOT (unbalanced Sinkhorn) solve time & $<1$\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Complementary competence (Gate C)}
+The competence matrix is complementary: different policies are strongest on
+different experiences, i.e.\ the local comparative advantage that the routing
+hypothesis needs. The per-experience argmax over policies for the headline run
+is $\big[\,0,\,0,\,1,\,0,\,2,\,1\,\big]$.
+
+\begin{table}[h]
+\centering
+\caption{Best donor policy per discovered valid experience,
+$\operatorname{best}(e)=\arg\max_i C[i,e]$, for the headline run. Three distinct
+policies (0, 1, 2) each lead on at least one experience --- Gate~C passes.}
+\label{tab:complementarity}
+\small
+\begin{tabular}{l cccccc}
+\toprule
+\textbf{Experience $e$} & $e_1$ & $e_2$ & $e_3$ & $e_4$ & $e_5$ & $e_6$ \\
+\midrule
+\textbf{Best policy $\arg\max_i C[i,e]$} & 0 & 0 & 1 & 0 & 2 & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------------
+\section{Routing comparison (Experiment 4)}
+Table~\ref{tab:exp4-metrics} lists the metrics logged by the matched-budget
+comparison harness (\code{scripts/run\_baseline.py}, PLAN.md \S19.4).
+Table~\ref{tab:exp4-status} gives the qualitative outcome per arm on the
+synthetic environment. \textbf{Quantitative per-arm success/return magnitudes on
+a real suite are pending a GPU run and are intentionally not tabulated here to
+avoid over-claiming from a single small-environment seed.}
+
+\begin{table}[h]
+\centering
+\caption{Metrics recorded for the routing comparison (PLAN.md \S19.4).}
+\label{tab:exp4-metrics}
+\small
+\begin{tabular}{L{6.4cm} L{6.4cm}}
+\toprule
+\textbf{Performance} & \textbf{Transfer / cost} \\
+\midrule
+Average episodic return & Positive-transfer rate \\
+Success rate & Negative-transfer rate \\
+Area under the learning curve & Improvement per routed transition \\
+Environment interactions to threshold & Routing overhead (wall-clock) \\
+Mean population performance & OT-solver time \\
+Worst-policy performance & Routed-batch fraction \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Qualitative routing-comparison outcome on the synthetic environment.
+Numeric magnitudes pending Meta-World/GPU.}
+\label{tab:exp4-status}
+\small
+\begin{tabular}{c L{4.0cm} L{7.4cm}}
+\toprule
+\textbf{ID} & \textbf{Router} & \textbf{Observation (synthetic, single seed)} \\
+\midrule
+B1 & \code{no\_share} & Reference; independent parallel learning. \\
+B2 & \code{share\_all} & Learns, but aggregates data indiscriminately. \\
+B3 & \code{random} & Same bandwidth as routing, uninformed selection. \\
+B4 & \code{td\_priority} & Global TD importance; not receiver-specific. \\
+B6 & \code{greedy} & Positive over B1/B2, but small margin. \\
+B7 & \code{uot} & Transports 117 chunks; not yet decisively above greedy. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------------
+\section{Experiment suite}
+Table~\ref{tab:experiments} lists the designed experiments (PLAN.md \S19) and
+their status.
+
+\begin{table}[h]
+\centering
+\caption{Designed experiments and current status.}
+\label{tab:experiments}
+\small
+\begin{tabular}{c L{7.6cm} L{3.9cm}}
+\toprule
+\textbf{Exp} & \textbf{Question} & \textbf{Status} \\
+\midrule
+1 & Does complementary experience emerge? & \yes~Done (Table~\ref{tab:complementarity}) \\
+2 & Does chunk grouping look functionally meaningful? & \wip~Inspection artifacts wired \\
+3 & Does deficit identify useful receiver needs? & \wip~Harness present \\
+4 & Routing comparison (B1--B7, matched budget) & \wip~Qualitative (synthetic) \\
+5 & Core ablations (A1--A6) & \no~Pending GPU \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ablation set (Experiment 5) is summarised in Table~\ref{tab:ablations}.
+
+\begin{table}[h]
+\centering
+\caption{Core ablations (PLAN.md \S19.5).}
+\label{tab:ablations}
+\small
+\begin{tabular}{c L{5.0cm} L{6.6cm}}
+\toprule
+\textbf{Ablation} & \textbf{Change} & \textbf{Question} \\
+\midrule
+A1 & Fixed-length windows (no dynamic experiences) & Does functional grouping matter? \\
+A2 & Route from strongest donors uniformly & Does receiver-need estimation matter? \\
+A3 & Greedy instead of OT & Does transport-level assignment matter? \\
+A4 & No success-support filter & Does filtering repeated successful experience matter? \\
+A5 & Population size $N\in\{2,4,8\}$ & How does the effect scale with $N$? \\
+A6 & Vary routing budget & Quality of routing vs.\ simply more shared data? \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------------
+\section{Verification: unit tests}
+The scientific core is unit-tested (PLAN.md \S22); the OT gate must pass before
+any routing experiment. Table~\ref{tab:tests} lists the coverage.
+
+\begin{table}[h]
+\centering
+\caption{Unit-test coverage of the pipeline core.}
+\label{tab:tests}
+\small
+\begin{tabular}{L{4.0cm} L{9.0cm}}
+\toprule
+\textbf{Module} & \textbf{Property verified} \\
+\midrule
+Segmenter & Boundaries sorted; no overlap; full cover; min chunk length respected. \\
+Grouper & Same pre/effect $\to$ same experience; large difference $\to$ different; deterministic prototype update. \\
+Vocabulary & Close prototypes merge. \\
+Validity & Repeated successful cluster becomes valid; rare cluster stays provisional. \\
+Competence & Synthetic $A\,8/10 > B\,2/10 \Rightarrow C[A,e] > C[B,e]$. \\
+Deficit & Frontier $=\max_i C[i,e]$; best-policy deficit $=0$; weaker policy $>0$. \\
+OT & $A$ strong on $e_1$, $B$ strong on $e_2 \Rightarrow$ transport $A{:}e_1\to B{:}e_1$, $B{:}e_2\to A{:}e_2$. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------------
+\section{Configuration}
+Table~\ref{tab:config} records the default configuration used for the runs above
+(\code{pipeline.py}, PLAN.md \S23). Thresholds such as \code{eps\_experience}
+are calibrated from nearest-neighbour descriptor-distance histograms
+(PLAN.md \S24) rather than chosen arbitrarily.
+
+\begin{table}[h]
+\centering
+\caption{Key default hyper-parameters.}
+\label{tab:config}
+\small
+\begin{tabular}{l l l}
+\toprule
+\textbf{Group} & \textbf{Parameter} & \textbf{Value} \\
+\midrule
+Population   & size $N$ & 4 \\
+Experience   & \code{k\_seg} / \code{median\_window} / \code{min\_chunk\_len} & 6 / 7 / 4 \\
+Experience   & \code{eps\_experience} (calibrated) & 1.1 \\
+Experience   & \code{min\_success\_support} / \code{success\_support\_threshold} & 3 / 0.05 \\
+Experience   & \code{refresh\_interval} & 10{,}000 \\
+Competence   & \code{beta\_alpha} / \code{beta\_beta} & 1.0 / 1.0 \\
+Competence   & \code{min\_opportunities} / \code{horizon} & 5 / 8 \\
+Routing      & \code{routing\_interval} / \code{budget\_chunks} & 5{,}000 / 32 \\
+Routing      & \code{route\_batch\_fraction} & 0.25 \\
+Routing      & \code{max\_routed\_experiences} (OT problem cap) & 40 \\
+OT           & \code{reg} / \code{reg\_m} / \code{big\_cost} & 0.05 / 1.0 / 1000 \\
+Evaluation   & \code{eval\_interval} / \code{episodes\_per\_policy} & 10{,}000 / 20 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------------
+\section{Dashboard (static figures)}
+\label{sec:dashboard}
+\code{scripts/run\_full.py} writes the following static artifacts under
+\code{outputs/<run>/}: per-policy learning curves
+(\code{learning\_curves.png}), experience-vocabulary size over time
+(\code{vocab\_over\_time.png}), competence and deficit heatmaps
+(\code{competence\_deficit.png}), and the donor$\to$receiver transport matrix
+(\code{uot\_transport.png}), together with \code{metrics.json}.
+
+To embed them, generate the run and uncomment the block below (point
+\code{\textbackslash graphicspath} at the run directory, or copy the PNGs next
+to this file).
+
+\begin{verbatim}
+% \graphicspath{{../outputs/<run>/}}
+% \begin{figure}[h]\centering
+%   \includegraphics[width=.48\textwidth]{learning_curves.png}\hfill
+%   \includegraphics[width=.48\textwidth]{vocab_over_time.png}\\[4pt]
+%   \includegraphics[width=.48\textwidth]{competence_deficit.png}\hfill
+%   \includegraphics[width=.48\textwidth]{uot_transport.png}
+%   \caption{HERP dashboard: learning curves, vocabulary growth,
+%            competence/deficit heatmaps, and the UOT transport matrix.}
+% \end{figure}
+\end{verbatim}
+
+%--------------------------------------------------------------------------
+\section{Summary}
+\begin{itemize}\itemsep2pt
+  \item The full MVP pipeline runs end-to-end on the synthetic environment and
+        is unit-tested, including the OT gate (Table~\ref{tab:tests}).
+  \item Complementary competence emerges --- Gate~C passes, with three of four
+        policies each leading on some experience (Table~\ref{tab:complementarity}).
+  \item The UOT router produces a real, non-trivial routing signal (117
+        transported chunks; sub-millisecond solve, Table~\ref{tab:headline}).
+  \item Gate~D/E magnitudes are positive but small on the synthetic
+        environment; deciding whether OT earns its place over greedy requires a
+        harder suite (Meta-World, GPU), for which the backbone is already
+        wired as a drop-in swap.
+\end{itemize}
+
+\end{document}
