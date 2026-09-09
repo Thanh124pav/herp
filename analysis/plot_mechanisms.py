@@ -46,14 +46,20 @@ def main():
         fig.tight_layout();fig.savefig(out/'sigma_validation.pdf',bbox_inches='tight');fig.savefig(out/'sigma_validation.png',dpi=220,bbox_inches='tight');plt.close(fig)
     for path in sorted(root.glob('p_*/p.csv')):
         if not (path.parent/'summary.json').exists():continue
-        rows=read(path);y=[float(r['delta_return']) for r in rows]
+        rows=read(path)
+        # Controlled PPO-delta is the canonical target; fall back to the legacy
+        # one-step-SGD column when reading older CSVs.
+        target_key='ppo_delta_return' if rows and 'ppo_delta_return' in rows[0] else 'delta_return'
+        y_label=('J_ref(theta_B) - J_ref(theta_A)' if target_key=='ppo_delta_return'
+                 else 'Paired change in return')
+        y=[float(r[target_key]) for r in rows]
         fig,axes=plt.subplots(1,4,figsize=(7,2.5));summary[path.parent.name]={}
         for ax,key,label in zip(axes,('occupancy','cosine','dot','fisher'),('Occupancy','Cosine','Dot product','Diagonal Fisher')):
             x=[float(r[key]) for r in rows];result=stats(x,y);summary[path.parent.name][key]=result
             ax.scatter(x,y,s=12,color='#a64b35',alpha=.8,edgecolors='none');ax.axhline(0,color='.6',lw=.6)
             ax.set_xlabel(label)
             ax.set_title(f"ρ = {result['rho']:.3f}" if result['rho'] is not None else 'ρ undefined')
-        axes[0].set_ylabel('Paired change in return')
+        axes[0].set_ylabel(y_label)
         fig.tight_layout();fig.savefig(out/'p_validation.pdf',bbox_inches='tight');fig.savefig(out/'p_validation.png',dpi=220,bbox_inches='tight');plt.close(fig)
     (out/'correlations_bootstrap.json').write_text(json.dumps(summary,indent=2))
     lines=['# Mechanism correlations','', 'Bootstrap percentile intervals resample archived regions (2,000 resamples). They quantify variation across this checkpoint’s sampled regions, not across training seeds.','',
