@@ -28,6 +28,7 @@ metaworld = ["metaworld", "mujoco>=2.3", "gymnasium>=0.29"]
 # Experiment logging (PLAN.md section 21). Runs also always log locally (JSONL).
 logging = ["wandb>=0.16"]
 dev = ["pytest>=7.0"]
+maniskill = ["mani-skill>=3.0", "gymnasium>=1.0", "tyro>=0.8", "tensorboard>=2.14"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
