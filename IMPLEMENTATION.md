@@ -1,146 +1,493 @@
-# HERP Implementation Plan: ICRA 2027 Emergency Build
+# HERP IMPLEMENTATION.md
 
-**Paper deadline:** 15 September 2026, 11:59 PM PST  
-**Paper constraint:** 8 pages total, including references.  
-**Primary goal:** produce a clean, defensible state-based robot-RL result before expanding the method.
+## 0. Goal
 
-The implementation should be deliberately minimal. Do not build a large framework first.
+Implement one simple ICRA-ready HERP codebase with:
 
----
+1. one PPO backbone,
+2. one HERP core,
+3. three benchmark adapters,
+4. six main methods,
+5. strict equal-budget accounting,
+6. reproducible experiment runners.
 
-# 1. Frozen MVP
+Supported benchmark groups:
 
-The submission-grade MVP is:
+- ManiSkill
+- Meta-World
+- Gymnasium Robotics / Fetch
 
-> **ManiSkill state-based PPO + archived simulator states + multi-step future branching score \(\sigma_v\) + reference-gradient alignment \(p_v\) + budget allocation \(q_v\propto p_v\sigma_v\).**
-
-Everything else is optional until this works.
-
-Use **PPO** first because:
-
-1. ManiSkill already provides a tested official PPO baseline;
-2. reset rollouts are on-policy under the current policy;
-3. policy-gradient signatures for \(p_v\) are natural;
-4. the code is compact enough to modify quickly.
-
-Do not start with SAC unless PPO is clearly failing on the selected task.
+Do not turn HERP into a general robotics framework.
 
 ---
 
-# 2. Base codebase
+# 1. Repository structure
 
-## 2.1 Primary environment / PPO codebase
-
-Use the official ManiSkill repository:
-
-https://github.com/haosulab/ManiSkill
-
-Relevant code:
-
-`examples/baselines/ppo/`
-
-The official ManiSkill PPO is adapted from CleanRL / LeanRL and supports state-based and visual RL.
-
-Primary files to inspect:
-
-- `examples/baselines/ppo/ppo.py`
-- `examples/baselines/ppo/ppo_fast.py`
-- `examples/baselines/ppo/baselines.sh`
-
-For ICRA, use **state observations only**.
-
-Recommended control mode for tabletop Panda tasks:
-
-`pd_ee_delta_pose`
-
-unless the ManiSkill task-specific PPO command uses a better tuned mode.
-
----
-
-## 2.2 State restoration
-
-ManiSkill exposes simulator state snapshots through:
-
-```python
-state = env.get_state_dict()
-env.set_state_dict(state)
+```text
+herp/
+├── train.py
+├── pyproject.toml
+├── configs/
+│   ├── base.yaml
+│   ├── maniskill/
+│   ├── metaworld/
+│   └── fetch/
+├── src/herp/
+│   ├── allocator.py
+│   ├── archive.py
+│   ├── gradient_signature.py
+│   ├── probe.py
+│   ├── regions.py
+│   ├── relevance.py
+│   ├── rollout_buffer.py
+│   ├── sigma.py
+│   ├── eval.py
+│   ├── logging.py
+│   ├── baselines/
+│   │   ├── rnd.py
+│   │   └── disagreement.py
+│   └── envs/
+│       ├── base.py
+│       ├── maniskill.py
+│       ├── metaworld.py
+│       └── fetch.py
+├── scripts/
+│   ├── run_suite.py
+│   ├── run_mechanisms.py
+│   ├── run_ablation.py
+│   ├── check_restore.py
+│   └── smoke.py
+└── analysis/
+    ├── aggregate.py
+    ├── plot_learning.py
+    ├── plot_sigma.py
+    └── plot_p.py
 ```
 
-and supports resets using saved state dictionaries:
+The old `experience_routing/` code may remain temporarily, but new HERP experiments must import only `src/herp`.
+
+---
+
+# 2. Minimal EnvAdapter
+
+Create:
 
 ```python
-obs, info = env.reset(
+from abc import ABC, abstractmethod
+
+class EnvAdapter(ABC):
+
+    @abstractmethod
+    def reset(self, seed=None):
+        ...
+
+    @abstractmethod
+    def step(self, action):
+        ...
+
+    @abstractmethod
+    def save_state(self):
+        ...
+
+    @abstractmethod
+    def restore_state(self, snapshot):
+        ...
+
+    @abstractmethod
+    def obs_tensor(self, obs):
+        ...
+
+    @abstractmethod
+    def region_features(self, obs):
+        ...
+
+    @abstractmethod
+    def action_low(self):
+        ...
+
+    @abstractmethod
+    def action_high(self):
+        ...
+
+    @abstractmethod
+    def elapsed_steps(self):
+        ...
+
+    @abstractmethod
+    def success_from_info(self, info):
+        ...
+```
+
+HERP core must not directly call ManiSkill- or MuJoCo-specific APIs.
+
+---
+
+# 3. ManiSkill adapter
+
+Wrap the current working ManiSkill implementation.
+
+Snapshot:
+
+```python
+env.unwrapped.get_state_dict()
+```
+
+Restore using:
+
+```python
+env.reset(
     options={
         "reset_to_env_states": {
-            "env_states": saved_state,
-            "obs": None,
+            "env_states": snapshot.env_state
         }
     }
 )
 ```
 
-ManiSkill also provides `CachedResetWrapper`.
+Also restore:
 
-This is the key infrastructure enabling HERP.
+- controller state,
+- elapsed steps,
+- wrapper elapsed-step counters.
 
-Relevant documentation:
+Keep the current restoration logic because the pilot already showed near-zero restore error.
 
-- https://maniskill.readthedocs.io/en/latest/user_guide/tutorials/custom_tasks/advanced.html
-- https://maniskill.readthedocs.io/en/latest/user_guide/wrappers/cached_reset.html
+Use the current state observation for:
 
----
-
-# 3. Repository layout
-
-Implement the following structure inside the HERP repository.
-
-```text
-herp/
-├── train.py
-├── configs/
-│   ├── base.yaml
-│   ├── pushcube.yaml
-│   ├── pickcube.yaml
-│   ├── stackcube.yaml
-│   └── peginsertion.yaml
-├── herp/
-│   ├── archive.py
-│   ├── regions.py
-│   ├── probe.py
-│   ├── sigma.py
-│   ├── relevance.py
-│   ├── allocator.py
-│   ├── gradient_signature.py
-│   ├── rollout_buffer.py
-│   ├── eval.py
-│   └── logging.py
-├── baselines/
-│   ├── uniform.py
-│   ├── rnd.py
-│   ├── disagreement.py
-│   ├── plr_region.py
-│   └── go_explore_region.py
-├── scripts/
-│   ├── smoke.sh
-│   ├── main.sh
-│   ├── ablation.sh
-│   ├── sigma_validation.sh
-│   └── p_validation.sh
-└── analysis/
-    ├── aggregate.py
-    ├── plot_learning.py
-    ├── plot_budget.py
-    ├── plot_sigma_correlation.py
-    └── plot_p_correlation.py
+```python
+region_features(obs)
 ```
 
-Do not refactor ManiSkill more than necessary.
+after normalization.
 
 ---
 
-# 4. Core data structures
+# 4. Meta-World adapter
 
-## 4.1 Region
+Support single-task environments.
+
+Representative tasks:
+
+```text
+button-press-v3
+drawer-open-v3
+pick-place-v3
+peg-insert-side-v3
+```
+
+Use dense reward if available.
+
+Snapshot must contain at least:
+
+```python
+@dataclass
+class MetaWorldSnapshot:
+    qpos: np.ndarray
+    qvel: np.ndarray
+    mocap_pos: np.ndarray
+    mocap_quat: np.ndarray
+    task_state: dict
+    elapsed_steps: int
+```
+
+`task_state` must preserve task-specific state such as:
+
+- randomized goal,
+- object configuration,
+- episode-local variables.
+
+Do not assume `qpos/qvel` alone are sufficient.
+
+Restore test:
+
+1. reset,
+2. run random actions,
+3. save snapshot,
+4. apply action `a`,
+5. restore,
+6. apply same `a`,
+7. compare observation, reward, done flags.
+
+Require approximately:
+
+```text
+max observation error < 1e-5
+reward error < 1e-6
+termination/truncation match
+```
+
+If exact replay fails, do not use that task in the paper.
+
+---
+
+# 5. Fetch adapter
+
+Support:
+
+```text
+FetchPush-v4
+FetchPickAndPlace-v4
+```
+
+Flatten dict observation as:
+
+```python
+obs_tensor = torch.cat([
+    observation,
+    achieved_goal,
+    desired_goal,
+])
+```
+
+Use the same representation initially for regionization.
+
+Snapshot:
+
+```python
+@dataclass
+class FetchSnapshot:
+    qpos: np.ndarray
+    qvel: np.ndarray
+    mocap_pos: np.ndarray
+    mocap_quat: np.ndarray
+    desired_goal: np.ndarray
+    elapsed_steps: int
+    extra: dict
+```
+
+Restore all simulator and goal-related state.
+
+Run the same one-step replay test as Meta-World.
+
+---
+
+# 6. PPO backbone
+
+Use one PPO implementation everywhere.
+
+Actor:
+
+```text
+Linear(obs_dim, 256)
+Tanh
+Linear(256, 256)
+Tanh
+Linear(256, action_dim)
+```
+
+Critic:
+
+```text
+Linear(obs_dim, 256)
+Tanh
+Linear(256, 256)
+Tanh
+Linear(256, 1)
+```
+
+Default hyperparameters:
+
+```yaml
+learning_rate: 3e-4
+gamma: 0.99
+gae_lambda: 0.95
+clip_coef: 0.2
+update_epochs: 4
+num_minibatches: 4
+max_grad_norm: 0.5
+```
+
+Task-specific horizons and total timesteps may differ.
+
+Do not change the PPO backbone between methods.
+
+---
+
+# 7. Fix gradient signature before long runs
+
+The pilot actor-head-only signature should be replaced.
+
+Use full actor parameters:
+
+```python
+def signature_parameters(agent):
+    params = []
+    params.extend(agent.actor.parameters())
+    params.extend(agent.actor_head.parameters())
+    params.append(agent.logstd)
+    return params
+```
+
+Do not include critic parameters.
+
+---
+
+# 8. Fix advantage normalization for \(p_v\)
+
+Do not independently zero-mean and normalize each small region batch.
+
+Recommended:
+
+```python
+adv_scale = running_std_of_training_advantages
+adv_sig = advantages / (adv_scale + 1e-8)
+```
+
+Use the same scale for reference and candidate region signatures in a scoring round.
+
+Do not subtract each region's own advantage mean.
+
+---
+
+# 9. Policy gradient signature
+
+Use
+
+\[
+L_{\mathrm{sig}}
+=
+-
+\mathbb E[
+\log\pi_\theta(a\mid s)\hat A
+].
+\]
+
+Implementation:
+
+```python
+def policy_gradient_signature(agent, obs, actions, advantages, adv_scale):
+    params = signature_parameters(agent)
+
+    dist = agent.get_distribution(obs)
+    logprob = dist.log_prob(actions).sum(-1)
+
+    adv = advantages.detach() / (adv_scale + 1e-8)
+
+    loss = -(logprob * adv).mean()
+
+    grads = torch.autograd.grad(
+        loss,
+        params,
+        allow_unused=True,
+        retain_graph=False,
+        create_graph=False,
+    )
+
+    return flatten(grads)
+```
+
+Do not add gradient projection unless memory becomes an actual problem.
+
+---
+
+# 10. Implement \(p_v\) estimators
+
+Support:
+
+```text
+cosine
+dot
+fisher
+occupancy
+hybrid
+```
+
+Cosine:
+
+\[
+p_v^{\mathrm{raw}}
+=
+\frac{
+g_{\mathrm{ref}}^\top g_v
+}{
+\|g_{\mathrm{ref}}\|
+\|g_v\|
++\epsilon
+}.
+\]
+
+Dot:
+
+\[
+p_v^{\mathrm{raw}}
+=
+g_{\mathrm{ref}}^\top g_v.
+\]
+
+Diagonal Fisher:
+
+\[
+p_v
+=
+g_{\mathrm{ref}}^\top
+\frac{
+g_v
+}{
+F_{\mathrm{diag}}+\lambda
+}.
+\]
+
+Occupancy:
+
+\[
+p_v^{\mathrm{occ}}
+=
+\frac{
+N_v+\epsilon
+}{
+N_{\mathrm{ref}}+K\epsilon
+}.
+\]
+
+Hybrid:
+
+```python
+score = (
+    (p_occ + eps) ** eta
+    * (p_grad + eps) ** (1 - eta)
+)
+```
+
+Use default:
+
+```yaml
+eta: 0.5
+```
+
+Ablate:
+
+```text
+0.0
+0.5
+1.0
+```
+
+---
+
+# 11. Reference batch
+
+Reference rollouts must:
+
+- start from ordinary environment reset,
+- use current policy,
+- use separate training-time seeds,
+- never use final evaluation seeds,
+- never be used for PPO optimization.
+
+Recommended:
+
+```yaml
+reference_horizon: 128
+relevance_interval: 5
+```
+
+Reference steps count toward the global interaction budget.
+
+---
+
+# 12. Archive
+
+Keep:
 
 ```python
 @dataclass
@@ -148,448 +495,135 @@ class Region:
     region_id: int
     centroid: Tensor
     count: int
-
     snapshots: list
     last_seen_step: int
     last_probed_step: int
-
-    sigma_raw: float = 0.0
-    sigma_ema: float = 0.0
-
-    p_raw: float = 0.0
-    p_ema: float = 0.0
-
-    priority: float = 0.0
+    sigma_raw: float
+    sigma_ema: float
+    p_raw: float
+    p_ema: float
+    priority: float
 ```
 
-Each snapshot stores:
+Snapshot:
 
 ```python
 @dataclass
 class Snapshot:
-    env_state: dict
+    env_state: Any
     obs: Tensor
-    timestep: int
+    global_step: int
     episode_id: int
     return_so_far: float
+    elapsed_steps: int
 ```
 
-Cap snapshots per region with reservoir sampling, e.g. `max_snapshots_per_region=8`.
+Use reservoir sampling.
+
+Recommended:
+
+```yaml
+max_snapshots_per_region: 8
+```
 
 ---
 
-# 5. Regionizer
+# 13. Regionizer
 
-For the emergency version, use normalized state features and online k-center / radius clustering.
+Keep radius-based clustering.
 
-## 5.1 Feature
-
-```python
-z = normalize(obs_state)
-```
-
-Optionally exclude:
-- target-independent constant dimensions;
-- raw quaternion duplication if it destabilizes Euclidean distance.
-
-Do not learn a representation before the basic method works.
-
-## 5.2 Assignment
-
-```python
-dist = torch.cdist(z[None], centroids)
-v = argmin(dist)
-
-if min_dist > region_radius and num_regions < max_regions:
-    create_new_region(z)
-else:
-    assign_to(v)
-    update_centroid_ema(v, z)
-```
-
-Recommended initial values:
+Recommended defaults:
 
 ```yaml
 region_radius: 0.5
 max_regions: 128
-max_snapshots_per_region: 8
+archive_interval: 8
+max_candidates: 4
 ```
 
-The actual radius must be tuned after observation normalization.
+Use:
 
-## 5.3 Candidate-region filter
+```python
+z = env_adapter.region_features(obs)
+```
 
-Do not score all regions every iteration.
+then HERP's running normalizer.
 
-At each allocation round, form a candidate set from:
-
-1. regions visited in the most recent ordinary rollout;
-2. top stale regions;
-3. a small uniform sample from the archive.
-
-Start with at most 16 candidate regions per scoring round.
+No learned embedding for ICRA.
 
 ---
 
-# 6. Probe rollouts
+# 14. \(\sigma_v\) probes
 
-## 6.1 Probe horizon
+Support:
 
-Start with:
+```text
+pairwise
+branch
+return
+```
+
+Default:
 
 ```yaml
 probe_horizon: 8
-num_action_probes: 4
+num_probes: 4
 num_env_repeats: 1
-```
-
-Try \(H\in\{4,8,16\}\) later.
-
-## 6.2 Action probing
-
-For a restored state \(x_v\), use the current policy mean plus controlled perturbation.
-
-For continuous Gaussian PPO:
-
-```python
-mu, std = policy(obs)
-eps = torch.randn_like(mu)
-
-a_probe = clamp(
-    mu + probe_scale * std * eps,
-    action_low,
-    action_high,
-)
-```
-
-Then continue the short rollout with either:
-
-### Option A — persistent perturbed policy
-
-Sample current-policy actions normally for every future step.
-
-### Option B — first-action perturbation
-
-Perturb only the first action, then follow the current policy.
-
-Use **Option B first**. It makes "branch point" interpretation cleaner.
-
-Recommended:
-
-```yaml
 probe_scale: 1.0
-```
-
-Ablate `0.5, 1.0, 2.0`.
-
----
-
-# 7. Future feature \(\Psi(\tau^+)\)
-
-Use normalized state features.
-
-```python
-future_feature = weighted_mean(
-    phi(s_1), ..., phi(s_H),
-    weights=gamma_branch ** arange(H)
-)
-```
-
-Recommended:
-
-```yaml
 gamma_branch: 0.95
-```
-
-Also log:
-
-- endpoint feature `phi(s_H)`;
-- short-horizon return;
-- bootstrapped return.
-
-These are useful for estimator ablations without recollecting data.
-
----
-
-# 8. \(\sigma_v\) implementation
-
-## 8.1 Main MVP: pairwise trajectory dispersion
-
-```python
-def pairwise_sigma(Z):
-    # Z: [K, d]
-    diff = Z[:, None, :] - Z[None, :, :]
-    d2 = (diff ** 2).sum(-1)
-
-    K = Z.shape[0]
-    mask = ~torch.eye(K, dtype=torch.bool, device=Z.device)
-
-    sigma2 = 0.5 * d2[mask].mean()
-    return torch.sqrt(sigma2 + 1e-8)
-```
-
-Normalize sigma across candidate regions using robust rank or running quantiles.
-
-Do not use raw magnitudes directly in allocation until scale is stable.
-
----
-
-## 8.2 Preferred branch decomposition
-
-When `num_env_repeats > 1`, store
-
-```python
-Z.shape == [A, M, d]
-```
-
-Compute:
-
-```python
-mean_per_action = Z.mean(dim=1)      # [A, d]
-global_mean = mean_per_action.mean(0)
-
-sigma_branch2 = (
-    (mean_per_action - global_mean).pow(2).sum(-1).mean()
-)
-
-sigma_dyn2 = (
-    (Z - mean_per_action[:, None, :]).pow(2).sum(-1).mean()
-)
-
-sigma2 = sigma_branch2 + lambda_dyn * sigma_dyn2
-```
-
-Default:
-
-```yaml
 lambda_dyn: 0.0
 ```
 
-This is the recommended final version if the implementation is stable.
-
----
-
-## 8.3 Gradient-variance oracle
-
-For validation only, compute a gradient signature for each probe trajectory.
+Pairwise:
 
 ```python
-g_k = get_policy_gradient_signature(traj_k)
-sigma_grad2 = mean(||g_k - mean(g)||^2)
-```
-
-This can use only:
-- actor output layer;
-- last MLP layer + actor head.
-
-It does not need full-network per-sample gradients.
-
----
-
-## 8.4 Ensemble-disagreement option
-
-Only implement if the basic \(\sigma\) experiment is weak.
-
-Use 5 MLP forward models:
-
-```python
-f_i([phi(s), a]) -> phi(s_next)
-```
-
-Train on replayed online transitions.
-
-Score:
-
-```python
-preds = stack([f_i(s, a) for i in ensemble])
-sigma_ens = preds.var(dim=0).mean().sqrt()
-```
-
-This is both:
-- a HERP estimator option;
-- an implementation of a strong exploration baseline.
-
----
-
-# 9. Gradient signature
-
-Full per-region policy gradients are expensive. Use a low-dimensional signature.
-
-## 9.1 Parameters
-
-First attempt:
-
-```python
-signature_params = actor_head.parameters()
-```
-
-Second attempt:
-
-```python
-signature_params = last_policy_mlp_layer + actor_head
-```
-
-Do not compute gradients through the critic for \(p_v\).
-
-## 9.2 PPO policy loss signature
-
-For a rollout batch \(D\):
-
-\[
-L_\pi(D)
-=
--\mathbb E[
-\min(r_t A_t,
-\operatorname{clip}(r_t,1-\epsilon,1+\epsilon)A_t)
-].
-\]
-
-For scoring, preferably use the unclipped score-function gradient under the current policy to reduce dependence on old-policy ratios:
-
-\[
-L_{\mathrm{sig}}(D)
-=
--
-\mathbb E[
-\log\pi_\theta(a_t\mid s_t)
-\widehat A_t
-].
-\]
-
-Then:
-
-```python
-g = autograd.grad(
-    L_sig,
-    signature_params,
-    retain_graph=False,
-    create_graph=False
+sigma = sqrt(
+    0.5 * mean_pairwise_squared_distance(Z)
 )
-
-g = torch.cat([x.flatten() for x in g])
 ```
 
-Normalize before cosine similarity.
+For branch decomposition, share continuation noise after the first action.
+
+Probe interactions count toward the training budget.
+
+Simplest ICRA rule:
+
+- probes only score regions,
+- allocated rollouts are used for PPO.
+
+Do not silently train PPO on perturbed probes unless their policy likelihood is handled correctly.
 
 ---
 
-# 10. \(p_v\) implementation
+# 15. Budget accounting
 
-## 10.1 Reference batch
+At every round:
 
-Every `relevance_interval`, collect a small batch from **ordinary resets**, with no HERP state resetting and no exploration perturbation.
-
-This batch is training-time reference data.
-
-Recommended:
-
-```yaml
-reference_episodes: 16
-relevance_interval: 5
+```text
+normal_steps
++ reference_steps
++ probe_steps
++ allocated_steps
+= round_budget
 ```
 
-Do not use final test seeds.
+Cumulatively:
 
-Compute:
-
-```python
-g_ref = gradient_signature(reference_batch)
+```text
+sum(training interaction categories)
+= global_env_steps
+<= total_timesteps
 ```
+
+Evaluation steps use a separate counter.
+
+Keep the current assertions.
 
 ---
 
-## 10.2 FO cosine alignment — main
+# 16. Allocator
 
-```python
-p_raw = cosine_similarity(g_v, g_ref)
-p_positive = relu(p_raw)
-p_ema = ema(p_ema, p_positive, tau=0.9)
-```
-
-Then normalize over candidate regions:
-
-```python
-p = (p_ema + eps_p) ** alpha_p
-p = p / p.sum()
-```
-
-Default:
-
-```yaml
-eps_p: 0.05
-alpha_p: 1.0
-```
-
----
-
-## 10.3 FO dot product
-
-Ablation:
-
-```python
-p_raw = torch.dot(g_v, g_ref)
-```
-
-Normalize by running robust scale before positive clipping.
-
----
-
-## 10.4 Diagonal Fisher influence
-
-Estimate diagonal empirical Fisher over the reference batch:
-
-```python
-F_diag = EMA(g_sample ** 2)
-```
-
-Then approximate
-
-\[
-(F+\lambda I)^{-1}g_v
-\]
-
-as:
-
-```python
-g_v_nat = g_v / (F_diag + damping)
-p_raw = dot(g_ref, g_v_nat)
-```
-
-Recommended:
-
-```yaml
-fisher_damping: 1e-3
-```
-
-This should be the first "influence-function-like" second estimator.
-
----
-
-## 10.5 Full IHVP — optional only
-
-Do not block the ICRA MVP on this.
-
-If implemented:
-
-1. use only the signature parameter subset;
-2. use Hessian-vector products;
-3. solve
-   \[
-   (F+\lambda I)x=g_v
-   \]
-   by conjugate gradient;
-4. score
-   \[
-   p_v=g_{\mathrm{ref}}^\top x.
-   \]
-
-Abort this feature if it consumes more than half a day without a stable result.
-
----
-
-# 11. Allocator
-
-## 11.1 Main score
+Use:
 
 ```python
 score_v = (
@@ -598,429 +632,347 @@ score_v = (
 )
 ```
 
-Normalize:
-
-```python
-q = score / score.sum()
-```
-
-Recommended:
+Default:
 
 ```yaml
 alpha: 1.0
 beta: 1.0
+eps_p: 0.05
 eps_sigma: 0.05
 uniform_mix: 0.10
+staleness_mix: 0.05
 ```
+
+For HERP-sigma:
+
+```text
+p_v = 1
+```
+
+For HERP-p:
+
+```text
+sigma_v = 1
+```
+
+---
+
+# 17. RND baseline
+
+Use same PPO backbone.
+
+Intrinsic reward:
+
+\[
+r_t^{\mathrm{total}}
+=
+r_t^{\mathrm{task}}
++
+\lambda_{\mathrm{RND}}
+r_t^{\mathrm{RND}}.
+\]
+
+Tune only on one development task:
+
+```text
+0.001
+0.01
+0.1
+```
+
+Then freeze as much as possible across the suite.
+
+---
+
+# 18. Disagreement baseline
+
+Use a small forward-model ensemble:
+
+\[
+f_j(s_t,a_t)
+\rightarrow
+\hat s_{t+1}.
+\]
+
+Intrinsic bonus:
+
+\[
+r_t^{\mathrm{dis}}
+=
+\operatorname{Var}_j[f_j(s_t,a_t)].
+\]
+
+Use same PPO backbone and the same coefficient-tuning protocol as RND.
+
+---
+
+# 19. Main methods
+
+Main paper:
+
+```text
+ppo
+rnd
+disagreement
+herp_sigma
+herp_p
+herp
+```
+
+Optional:
+
+```text
+go_explore
+plr
+```
+
+Do not block the paper on optional baselines.
+
+---
+
+# 20. Tasks
+
+ManiSkill:
+
+```text
+PushCube-v1
+PickCube-v1
+StackCube-v1
+PegInsertionSide-v1
+```
+
+Meta-World:
+
+```text
+button-press-v3
+drawer-open-v3
+pick-place-v3
+peg-insert-side-v3
+```
+
+Fetch:
+
+```text
+FetchPush-v4
+FetchPickAndPlace-v4
+```
+
+Total:
+
+```text
+10 tasks
+3 benchmark groups
+```
+
+---
+
+# 21. Config files
 
 Use:
 
-```python
-q = (1 - uniform_mix) * q + uniform_mix / len(q)
+```text
+configs/maniskill/pushcube.yaml
+configs/maniskill/pickcube.yaml
+configs/maniskill/stackcube.yaml
+configs/maniskill/peginsertion.yaml
+
+configs/metaworld/button_press.yaml
+configs/metaworld/drawer_open.yaml
+configs/metaworld/pick_place.yaml
+configs/metaworld/peg_insert_side.yaml
+
+configs/fetch/push.yaml
+configs/fetch/pick_place.yaml
 ```
 
-## 11.2 Budget
+Task files contain only task-specific settings.
 
-The most important fairness requirement:
-
-> Every method receives exactly the same total environment-step budget.
-
-Define a fixed split, for example:
-
-```yaml
-ordinary_interaction_fraction: 0.75
-allocated_interaction_fraction: 0.25
-```
-
-If a baseline does not use state resetting, it spends the entire budget on normal rollouts.
-
-For HERP:
+HERP defaults stay in:
 
 ```text
-total steps = normal steps + probe steps + allocated reset-rollout steps
+configs/base.yaml
 ```
 
-**Probe rollouts count toward the environment-interaction budget.**
-
-Reusing probe rollouts for training is allowed and recommended.
-
 ---
 
-# 12. Training integration
+# 22. Main experiment protocol
 
-## 12.1 Ordinary buffer
-
-Collect normal PPO trajectories exactly as the base implementation.
-
-## 12.2 Reset fragments
-
-For each allocated archived state:
-
-1. restore state;
-2. collect an \(H_{\text{train}}\)-step current-policy fragment;
-3. bootstrap at the final state with critic \(V_\theta(s_H)\);
-4. compute GAE within the fragment.
-
-Recommended:
-
-```yaml
-allocated_rollout_horizon: 32
-```
-
-If task episode horizon is short, use 16.
-
-## 12.3 Mixture
-
-Concatenate ordinary and reset-rollout transitions before PPO optimization.
-
-Log the source flag for every transition:
-
-```python
-source = NORMAL | PROBE | ALLOCATED
-```
-
-This enables later ablations.
-
----
-
-# 13. Baselines and codebases
-
-The baseline set should be divided into **must-run** and **nice-to-have**.
-
-## 13.1 Must-run baselines
-
-| Baseline | Why it is necessary | Codebase |
-|---|---|---|
-| PPO Uniform | Standard online RL control | ManiSkill official PPO: https://github.com/haosulab/ManiSkill/tree/main/examples/baselines/ppo |
-| HERP-\(\sigma\) | Tests branching-aware exploration alone | same HERP code; set \(p_v=1\) |
-| HERP-\(p\) | Tests performance-aware training alone | same HERP code; set \(\sigma_v=1\) |
-| HERP full | Proposed method | same code |
-| RND-PPO | Strong classic novelty baseline | CleanRL RND: https://github.com/vwxyzjn/cleanrl ; original: https://github.com/openai/random-network-distillation |
-| Disagreement | Direct competitor to dynamics-uncertainty \(\sigma\) | official: https://github.com/pathak22/exploration-by-disagreement |
-
-These six are enough for a credible emergency submission if executed cleanly.
-
----
-
-## 13.2 Strong additional baselines
-
-### Go-Explore
-
-Paper:
-https://www.nature.com/articles/s41586-020-03157-9
-
-Code:
-https://github.com/uber-research/go-explore
-
-Why relevant:
-- stores previously reached states;
-- returns to promising states;
-- explores from them;
-- demonstrated on a robot Fetch environment.
-
-Do not port the entire old codebase. Implement a **Go-Explore-style region priority** using the HERP archive.
-
-Minimal adaptation:
-
-```python
-priority = novelty_or_archive_score(region)
-sample archived state by priority
-roll out from it
-```
-
-This gives a fair same-backbone comparison.
-
-### Prioritized Level Replay
-
-Paper:
-https://arxiv.org/abs/2010.03934
-
-Code:
-https://github.com/facebookresearch/level-replay
-
-Adapt the idea from level to trajectory-space region:
-
-```python
-score_v = abs(TD_error_v) or abs(advantage_v)
-priority = score_v + staleness
-```
-
-Call it **PLR-style region replay**, not original PLR, because the sampling unit has changed.
-
----
-
-## 13.3 Optional baseline: ICM
-
-Paper:
-https://proceedings.mlr.press/v70/pathak17a.html
-
-Original code:
-https://github.com/pathak22/noreward-rl
-
-Useful only if RND and Disagreement are insufficient. Do not prioritize it over the main ablations.
-
----
-
-## 13.4 Cross-domain related method, not mandatory robot baseline
-
-### GradAlign
-
-https://arxiv.org/abs/2602.21492  
-https://github.com/StigLidu/GradAlign
-
-### InfOES
-
-https://aclanthology.org/2026.acl-long.2206/
-
-These are highly relevant to the \(p_v\) idea because they use validation/reference gradient alignment or influence for online RL experience/data selection.
-
-However they are LLM-RL methods. Treat them as related work and motivation unless there is time to implement a direct "alignment-only" baseline. HERP-\(p\) already serves this role experimentally.
-
----
-
-# 14. Benchmark environments
-
-Use ManiSkill because it provides:
-- robotics relevance;
-- GPU parallel simulation;
-- official PPO baseline;
-- state snapshots/restoration;
-- standardized evaluation.
-
-## 14.1 Emergency 4-task suite
-
-Run:
-
-1. `PushCube-v1`
-2. `PickCube-v1`
-3. `StackCube-v1`
-4. `PegInsertionSide-v1`
-
-Rationale:
-
-- PushCube: easy / relatively low branching control;
-- PickCube: grasp transition creates meaningful branch points;
-- StackCube: longer sequence with failure modes;
-- PegInsertionSide: precision task where small action differences can create divergent futures.
-
-If `StackCube-v1` is not in the official small PPO benchmark script, still use it if baseline PPO trains reliably. Otherwise replace it with `PushT-v1` from the official small benchmark.
-
----
-
-# 15. Experimental protocol
-
-## 15.1 Equal budget
-
-Fix an environment-step budget per task.
-
-All methods:
-- same policy network;
-- same PPO hyperparameters;
-- same observation mode;
-- same reward mode;
-- same control mode;
-- same training seeds;
-- same total interaction count.
-
-HERP's branch probes count as interaction.
-
-## 15.2 Seeds
-
-Submission minimum:
+For every task-method pair:
 
 ```text
-3 seeds per method/task
+3 training seeds minimum
+5 preferred if compute permits
 ```
 
-Preferred:
+At each evaluation checkpoint:
 
 ```text
-5 seeds per method/task
+50 ordinary-reset evaluation episodes
 ```
-
-If time is limited:
-- use 3 seeds for all main-table methods;
-- add 5 seeds only for the strongest 2 tasks after the paper deadline if allowed for a later revision, not for the submitted result.
-
-## 15.3 Evaluation
-
-At fixed interaction checkpoints:
-
-- 50 deterministic or low-noise evaluation episodes;
-- held-out reset seeds;
-- no archived-state reset;
-- no exploration perturbation.
 
 Report:
 
-1. success rate;
-2. normalized return;
-3. area under learning curve;
-4. environment steps to reach a fixed success threshold;
-5. wall-clock time;
-6. extra compute overhead.
+1. success rate,
+2. raw or normalized return,
+3. success AUC,
+4. return AUC,
+5. steps-to-threshold where meaningful,
+6. wall-clock overhead separately.
 
 ---
 
-# 16. Main paper table
+# 23. The 32k pilot is not a final benchmark
 
-Rows:
+Before performance claims:
+
+1. verify PPO learns each task,
+2. choose an adequate training budget,
+3. rerun all main methods under equal budget.
+
+If PPO remains at zero success, do not use that budget to rank methods by final success.
+
+---
+
+# 24. \(\sigma_v\) mechanism test
+
+Run on:
+
+```text
+ManiSkill PickCube
+ManiSkill PegInsertionSide
+Meta-World pick-place
+```
+
+Procedure:
+
+1. sample 50 archived regions,
+2. estimate \(K=4\) sigma,
+3. independently estimate \(K=64\) oracle sigma,
+4. compute Spearman correlation,
+5. save top/bottom branching-state visualizations.
+
+Optional:
+
+\[
+\rho(
+\sigma_{\mathrm{traj}},
+\sigma_{\mathrm{grad}}
+).
+\]
+
+---
+
+# 25. \(p_v\) mechanism test
+
+Replace the actor-head one-step SGD diagnostic.
+
+For each sampled region:
+
+1. clone checkpoint twice,
+2. collect a matched base PPO batch,
+3. collect region batch,
+4. update copy A on base,
+5. update copy B on base + region,
+6. evaluate both on identical reference seeds.
+
+Define:
+
+\[
+\Delta_v
+=
+J_{\mathrm{ref}}(\theta_B)
+-
+J_{\mathrm{ref}}(\theta_A).
+\]
+
+Correlate \(\Delta_v\) with:
+
+```text
+occupancy
+cosine
+dot
+fisher
+hybrid
+```
+
+Use at least 30 regions, preferably 50.
+
+The winning estimator becomes the main \(p_v\) implementation.
+
+---
+
+# 26. Core ablation
+
+On at least:
+
+```text
+ManiSkill PickCube
+ManiSkill PegInsertionSide
+Meta-World pick-place
+FetchPickAndPlace
+```
+
+run:
 
 ```text
 PPO
-RND
-Disagreement
 HERP-sigma
 HERP-p
 HERP
 ```
 
-Columns:
-
-```text
-PushCube success
-PickCube success
-StackCube success
-PegInsertion success
-Mean normalized score
-```
-
-Also provide a sample-efficiency figure:
-
-```text
-x-axis: environment interactions
-y-axis: success rate
-```
-
-Use 2 representative tasks in the main plot due to the ICRA 8-page limit.
+This is the required factorization study.
 
 ---
 
-# 17. Mechanism experiment A: does \(\sigma_v\) detect branch points?
+# 27. Estimator ablations
 
-This is mandatory.
+Only on one or two representative tasks.
 
-## Procedure
-
-At 2--3 policy checkpoints:
-
-1. sample 50--100 archived regions;
-2. estimate \(\hat\sigma_v\) with \(K=4\) futures;
-3. collect an expensive oracle with 64 futures from the same saved state;
-4. compute oracle trajectory variance;
-5. compute gradient-variance oracle on the policy head if affordable.
-
-Report:
-
-- Spearman correlation:
-  \[
-  \rho(\hat\sigma_v,\sigma_v^{64})
-  \]
-- optional:
-  \[
-  \rho(\hat\sigma_v,\sigma_{g,v})
-  \]
-- top-5 and bottom-5 region visualizations / trajectory plots.
-
-A good paper figure is:
+Sigma:
 
 ```text
-left: state snapshots with low sigma
-right: state snapshots with high sigma
-plus short future trajectories
+pairwise
+branch
+return
+disagreement
 ```
 
----
-
-# 18. Mechanism experiment B: does \(p_v\) predict useful updates?
-
-This is mandatory for the "performance-aware" claim.
-
-## Procedure
-
-At a fixed checkpoint:
-
-1. sample 30--50 regions;
-2. compute:
-   - occupancy relevance;
-   - cosine alignment;
-   - dot alignment;
-   - diagonal-Fisher influence;
-3. clone current policy;
-4. for each region, make one small policy update using only region data;
-5. evaluate the change in reference return / reference policy loss.
-
-Define ground truth:
-
-\[
-\Delta_v
-=
-J_{\mathrm{ref}}(\theta_v^+)
--
-J_{\mathrm{ref}}(\theta).
-\]
-
-Report Spearman correlation:
-
-\[
-\rho(p_v,\Delta_v).
-\]
-
-This figure can directly justify the chosen \(p_v\) estimator.
-
----
-
-# 19. Core ablations
-
-Run on at least two representative tasks.
-
-## 19.1 Score decomposition
-
-```text
-Uniform
-sigma only
-p only
-p * sigma
-```
-
-This is the single most important ablation.
-
-## 19.2 Sigma estimator
-
-```text
-return variance
-pairwise trajectory dispersion
-branch decomposition
-ensemble disagreement
-```
-
-If compute is limited, compare only:
-- pairwise;
-- branch decomposition;
-- ensemble.
-
-## 19.3 p estimator
+p:
 
 ```text
 occupancy
-FO cosine
-FO dot
-diag Fisher
+cosine
+dot
+fisher
+hybrid
 ```
 
-## 19.4 Probe horizon
+Do not run the full grid on all tasks.
+
+---
+
+# 28. Hyperparameter ablations
+
+Only after main results work.
+
+Probe horizon:
 
 ```text
-H = 4, 8, 16
+4
+8
+16
 ```
 
-## 19.5 Number of probe futures
+Number of probes:
 
 ```text
-K = 2, 4, 8
+2
+4
+8
 ```
 
-## 19.6 Allocated interaction fraction
+Allocated fraction:
 
 ```text
 0.10
@@ -1030,42 +982,138 @@ K = 2, 4, 8
 
 ---
 
-# 20. Critical anti-confounds
+# 29. Standardized restore tests
 
-The following mistakes will invalidate the main result.
+Support commands:
 
-## 20.1 Do not use final test data to compute \(p_v\)
+```bash
+python scripts/check_restore.py --benchmark maniskill --env-id PickCube-v1
+python scripts/check_restore.py --benchmark metaworld --env-id pick-place-v3
+python scripts/check_restore.py --benchmark fetch --env-id FetchPush-v4
+```
 
-Training-time reference rollouts and test rollouts must use different seeds / instances.
+Each test must check:
 
-## 20.2 Count probe interactions
+1. snapshot identity,
+2. same-action next-state replay,
+3. reward equality,
+4. termination/truncation equality,
+5. episode clock restoration.
 
-Do not give HERP more simulator interactions than baselines.
+Write a JSON report.
 
-## 20.3 Keep PPO identical
-
-Do not silently retune PPO only for HERP.
-
-## 20.4 Reset only to previously reached states
-
-Do not synthesize impossible simulator states for the main method.
-
-## 20.5 Separate branchiness from random noise
-
-If a stochastic environment produces high \(\sigma\) solely because of uncontrollable noise, test the branch decomposition and reduce \(\lambda_{\text{dyn}}\).
+A benchmark is paper-ready only after restore passes.
 
 ---
 
-# 21. Logging
+# 30. Server deployment cleanup
 
-Every run should log at minimum:
+Remove hard-coded local Python paths.
+
+Use:
+
+```bash
+PY=${PY:-python}
+```
+
+or simply:
+
+```bash
+python scripts/run_suite.py ...
+```
+
+Do not assume a WSL Conda path.
+
+---
+
+# 31. Device handling
+
+Do not globally hard-code:
+
+```text
+device=cpu
+sim_backend=physx_cpu
+```
+
+Put device/backend in config.
+
+For ICRA:
+
+- sequential CPU simulation is acceptable,
+- independent seeds can run as separate worker processes,
+- GPU-vectorized simulator refactor is optional.
+
+Do not redesign the entire stack only to use H100 before the algorithm is validated.
+
+---
+
+# 32. Suite runner
+
+Implement:
+
+```bash
+python scripts/run_suite.py     --benchmarks maniskill metaworld fetch     --methods ppo rnd disagreement herp_sigma herp_p herp     --seeds 0 1 2
+```
+
+Runner requirements:
+
+1. one directory per task-method-seed,
+2. skip completed runs,
+3. save console logs,
+4. fail visibly on crashes,
+5. aggregate completed runs periodically,
+6. never overwrite a changed protocol in the same output directory.
+
+---
+
+# 33. Reproducibility
+
+Every run stores:
+
+```text
+config.json
+metrics.csv
+regions.csv
+checkpoint_*.pt
+complete.json
+provenance.json
+```
+
+`provenance.json` should include:
+
+- SHA-256 source hashes,
+- Python version,
+- PyTorch version,
+- benchmark package version,
+- benchmark name,
+- git commit SHA if available,
+- seed,
+- device,
+- simulator backend,
+- total training interaction budget.
+
+---
+
+# 34. Logging
+
+Minimum:
 
 ```text
 global_env_steps
-wall_time
+normal_steps
+reference_steps
+probe_steps
+allocated_steps
+
 train_return
 eval_return
 eval_success
+
+policy_loss
+value_loss
+entropy
+approx_kl
+clipfrac
 
 num_regions
 num_archived_states
@@ -1081,240 +1129,134 @@ fraction_positive_alignment
 priority_entropy
 allocation_histogram
 
-normal_steps
-probe_steps
-allocated_steps
-
-policy_loss
-value_loss
-entropy
-approx_kl
-clipfrac
-
 gradient_signature_norm_ref
 gradient_signature_norm_region
+
+wall_time
 ```
 
-For each region score event, dump a compact row:
+---
+
+# 35. Tests before long runs
+
+Required:
 
 ```text
-step, env_id, region_id, sigma, p, priority,
-visit_count, last_seen, last_probed
-```
-
-Save to Parquet or CSV.
-
----
-
-# 22. Smoke-test checklist
-
-Before launching expensive experiments:
-
-### Environment
-- [ ] ManiSkill PPO reproduces learning on PushCube.
-- [ ] `get_state_dict` snapshot restores correctly.
-- [ ] same action from same restored state approximately reproduces the same next state in deterministic mode.
-
-### Archive
-- [ ] regions are created;
-- [ ] region count does not explode;
-- [ ] snapshots are bounded by reservoir size.
-
-### Sigma
-- [ ] identical futures give near-zero score;
-- [ ] action perturbations increase score at visibly sensitive states;
-- [ ] score scale does not explode.
-
-### p
-- [ ] `g_ref` is non-zero;
-- [ ] region cosine similarities span both low and high values;
-- [ ] p is recomputed after policy changes.
-
-### Budget
-- [ ] normal + probe + allocated steps exactly equal configured total.
-
-### PPO
-- [ ] reset fragments produce finite GAE;
-- [ ] no NaNs after mixing ordinary/reset data.
-
----
-
-# 23. Run plan
-
-Use a config interface such as:
-
-```bash
-python train.py \
-  --env-id PickCube-v1 \
-  --method herp \
-  --seed 0 \
-  --total-timesteps 3000000 \
-  --probe-horizon 8 \
-  --num-probes 4 \
-  --allocated-frac 0.25 \
-  --sigma-estimator branch \
-  --p-estimator cosine
-```
-
-Baselines:
-
-```bash
-python train.py --env-id PickCube-v1 --method ppo --seed 0
-python train.py --env-id PickCube-v1 --method rnd --seed 0
-python train.py --env-id PickCube-v1 --method disagreement --seed 0
-python train.py --env-id PickCube-v1 --method herp_sigma --seed 0
-python train.py --env-id PickCube-v1 --method herp_p --seed 0
-python train.py --env-id PickCube-v1 --method herp --seed 0
+[ ] all unit tests pass
+[ ] restore tests pass on all three adapters
+[ ] budget equality assertion passes
+[ ] PPO learns at least one task in every benchmark family
+[ ] HERP-sigma runs end-to-end
+[ ] HERP-p runs end-to-end
+[ ] HERP full runs end-to-end
+[ ] RND runs end-to-end
+[ ] Disagreement runs end-to-end
 ```
 
 ---
 
-# 24. Emergency schedule to ICRA
+# 36. Implementation order
 
-The official ICRA 2027 submission deadline is **15 September 2026, 11:59 PM PST** and the call states there is no planned extension.
+## Phase 1
 
-## 9 Sep — freeze + infrastructure
+Refactor current ManiSkill code behind `EnvAdapter` without changing behavior.
 
-Must finish:
-- ManiSkill PPO running;
-- state save / reset working;
-- archive + simple regions;
-- HERP allocator stub;
-- uniform method reproducing baseline.
+## Phase 2
 
-Do not work on full influence functions today.
+Fix \(p_v\):
 
-## 10 Sep — sigma + full loop
+1. full actor gradient,
+2. shared advantage scaling,
+3. occupancy estimator,
+4. hybrid estimator,
+5. controlled PPO-delta mechanism test.
 
-Must finish:
-- short restored-state probe rollout;
-- pairwise trajectory \(\sigma\);
-- cosine \(p\);
-- full `p * sigma` allocation;
-- one PushCube / PickCube end-to-end run.
+Do not launch long HERP-p runs before this.
 
-Decision at end of day:
-- if method is unstable, freeze pairwise sigma + cosine p and stop adding sophistication.
+## Phase 3
 
-## 11 Sep — main experiments
+Add Meta-World adapter and exact restore test.
 
-Launch:
-- PPO;
-- RND;
-- Disagreement;
-- sigma-only;
-- p-only;
-- HERP.
+## Phase 4
 
-Start with:
-- PickCube;
-- PegInsertion;
-- PushCube.
+Add Fetch adapter, dict-observation handling, goal restoration, and exact restore test.
 
-Add StackCube only when compute permits.
+## Phase 5
 
-## 12 Sep — mechanism validation
-
-Run:
-- sigma oracle correlation;
-- p vs actual-update correlation;
-- visualization of selected states.
-
-These experiments are more valuable than a large number of weak extra baselines.
-
-## 13 Sep — essential ablations + aggregate
-
-Run:
-- score decomposition;
-- H/K sensitivity on 1--2 tasks;
-- compile main table and learning curves.
-
-Freeze experiments by night unless a single missing run is critical.
-
-## 14 Sep — paper writing
-
-Produce:
-- method figure;
-- main table;
-- 2 learning curves;
-- sigma mechanism figure;
-- p correlation figure.
-
-Write the 8-page ICRA manuscript around existing results, not around planned results.
-
-## 15 Sep — final checks
-
-Only:
-- missing seeds if short;
-- reproducibility checks;
-- typo / formatting;
-- anonymization;
-- PaperPlaza upload.
-
-Do not introduce a new algorithmic component on submission day.
+Run long benchmarks only after all smoke tests pass.
 
 ---
 
-# 25. Priority if compute/time collapses
+# 37. Main experimental matrix
 
-If only enough time for a minimal paper, run:
+Target:
 
-## Tasks
+```text
+10 tasks
+6 methods
+3 seeds
+```
+
+Total:
+
+\[
+10\times6\times3=180
+\]
+
+training runs.
+
+This is the eventual matrix; coding can finish before all runs complete.
+
+---
+
+# 38. Reduced matrix if compute is limited
+
+Use:
+
+ManiSkill:
 
 ```text
 PickCube-v1
 PegInsertionSide-v1
-PushCube-v1
 ```
 
-## Methods
+Meta-World:
 
 ```text
-PPO
-RND
-Disagreement
-HERP-sigma
-HERP-p
-HERP
+pick-place-v3
+peg-insert-side-v3
 ```
 
-## Seeds
+Fetch:
 
 ```text
-3
+FetchPush-v4
+FetchPickAndPlace-v4
 ```
 
-## Mechanism studies
+Then:
 
 ```text
-sigma oracle correlation on PickCube
-p correlation on PickCube
-score decomposition on PickCube + PegInsertion
+6 tasks
+6 methods
+3 seeds
+= 108 runs
 ```
 
-This is preferable to running 10 baselines with poor controls.
+This is still sufficiently diverse for ICRA.
 
 ---
 
-# 26. Success criteria before paper freeze
+# 39. Paper success criteria
 
-The proposed method should satisfy at least three of the following before submission:
+Aim for:
 
-1. HERP improves final success over PPO on at least 2 non-trivial tasks.
-2. HERP improves learning-curve AUC / steps-to-threshold under equal interaction budget.
-3. Full \(p\sigma\) consistently beats either \(\sigma\)-only or \(p\)-only.
-4. Estimated \(\sigma_v\) correlates with high-sample future branching.
-5. Estimated \(p_v\) correlates with actual short-update reference improvement.
-6. Selected high-priority regions are qualitatively interpretable as task-relevant branching points.
+1. HERP improves sample efficiency over PPO on multiple tasks.
+2. HERP is competitive with or better than RND and Disagreement.
+3. Full HERP improves over at least one single-factor ablation consistently.
+4. \(\sigma_v\) correlates with high-sample future branching.
+5. the chosen \(p_v\) correlates positively with controlled PPO improvement.
+6. results hold on at least two simulator families.
+7. every method uses equal training interaction budget.
 
-If the full method does not beat its single-factor ablations, do not claim a joint-allocation contribution yet. Reframe around whichever estimator is actually supported by the evidence.
-
----
-
-# 27. Main paper story if results work
-
-The paper can be written as:
-
-> Existing exploration methods largely prioritize novelty or uncertainty, while replay/curriculum methods prioritize learning potential. In robot online RL, these signals should be coupled at the level of trajectory-space regions. HERP restores previously reached states and allocates a fixed interaction budget according to two online estimates: multi-step future branching \(\sigma_v\) and reference-objective gradient relevance \(p_v\). A stratified-sampling argument gives the allocation structure \(n_v\propto p_v\sigma_v\). Experiments show that the two quantities predict branching and useful policy updates respectively, and their joint allocation improves sample efficiency under equal simulator budgets.
-
-That is the version to target first.
+If gradient-based \(p_v\) remains weak but occupancy or hybrid works, use the empirically supported estimator in the main paper.

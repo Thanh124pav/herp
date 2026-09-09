@@ -1,0 +1,3 @@
+benchmark: metaworld
+env_id: pick-place-v3
+reward_mode: dense

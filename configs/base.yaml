@@ -1,8 +1,10 @@
+# HERP defaults; per-task overrides live in configs/<benchmark>/<task>.yaml.
 # EMA taus weight the OLD estimate. Extra budget includes probes and reference.
+benchmark: maniskill
 env_id: PushCube-v1
 method: herp
 seed: 0
-total_timesteps: 300000
+total_timesteps: 1000000
 rollout_horizon: 2048
 allocated_frac: 0.25
 allocated_rollout_horizon: 32
@@ -12,6 +14,7 @@ reference_horizon: 128
 signature_horizon: 32
 p_estimator: cosine
 sigma_estimator: pairwise
+hybrid_eta: 0.5
 region_radius: 0.5
 max_regions: 128
 max_snapshots_per_region: 8
@@ -25,6 +28,9 @@ gamma_branch: 0.95
 lambda_dyn: 0.0
 sigma_ema_tau: 0.9
 p_ema_tau: 0.9
+uniform_mix: 0.10
+staleness_mix: 0.05
+eval_interval: 50000
 eval_episodes: 50
 control_mode: pd_ee_delta_pose
 obs_mode: state
@@ -32,3 +38,4 @@ reward_mode: dense
 sim_backend: physx_cpu
 render_backend: cpu
 device: cpu
+torch_threads: 1

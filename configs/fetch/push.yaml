@@ -1,0 +1,5 @@
+# Fetch stub — the adapter is not implemented; runs will fail until
+# src/herp/envs/fetch.py is completed (Phase 4).
+benchmark: fetch
+env_id: FetchPush-v4
+reward_mode: dense

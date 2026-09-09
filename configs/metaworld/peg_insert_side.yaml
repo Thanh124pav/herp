@@ -1,0 +1,3 @@
+benchmark: metaworld
+env_id: peg-insert-side-v3
+reward_mode: dense

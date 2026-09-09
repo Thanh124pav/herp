@@ -12,7 +12,7 @@ from scipy.stats import spearmanr
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from train import (Args, Agent, make_env, collect_fragment, concat_batches, signature, occupancy_scores,
+from train import (Args, Agent, build_adapter, collect_fragment, concat_batches, signature, occupancy_scores,
                    empirical_fisher_diagonal, signature_parameters, evaluate_policy)
 from herp.probe import probe_region
 from herp.logging import CsvLogger
@@ -46,7 +46,8 @@ def main():
     cp=torch.load(opt.checkpoint,map_location='cpu',weights_only=False)
     args=Args(**cp['config']); args.device='cpu'
     archive,regionizer=cp['archive'],cp['regionizer']
-    env=make_env(args); ref_env=make_env(args); oracle_env=make_env(args)
+    adapter=build_adapter(args); ref_adapter=build_adapter(args); oracle_adapter=build_adapter(args)
+    env,ref_env,oracle_env=adapter.env,ref_adapter.env,oracle_adapter.env
     agent=Agent(archive.regions[0].centroid.numel(),env.action_space.shape[-1],args.hidden)
     agent.load_state_dict(cp['agent'])
     candidates=[r for r in archive if r.snapshots]
@@ -62,7 +63,7 @@ def main():
             snap=archive.sample_snapshot(region)
             kwargs=dict(num_env_repeats=args.num_env_repeats,probe_horizon=args.probe_horizon,
                         probe_scale=args.probe_scale,gamma_branch=args.gamma_branch,lambda_dyn=args.lambda_dyn,
-                        estimator=args.sigma_estimator,gamma=args.gamma)
+                        estimator=args.sigma_estimator,gamma=args.gamma,adapter=adapter)
             # Independent futures; never compare a subset against an oracle containing that subset.
             small=probe_region(env,snap,agent,regionizer,num_action_probes=opt.small_probes,**kwargs)
             oracle=probe_region(env,snap,agent,regionizer,num_action_probes=opt.oracle_probes,**kwargs)
@@ -92,55 +93,60 @@ def main():
             fig.suptitle('Low/high dispersion: future trajectories in shared state PCA coordinates')
             fig.tight_layout();fig.savefig(out/'sigma_futures.pdf');plt.close(fig)
     if opt.kind in ('p','both'):
-        reference=collect_fragment(ref_env,agent,args,opt.reference_steps,3,reset_seed=3_000_000+opt.seed)
-        heldout=collect_fragment(ref_env,agent,args,opt.reference_steps,3,reset_seed=3_100_000+opt.seed)
+        reference=collect_fragment(ref_env,agent,args,opt.reference_steps,3,reset_seed=3_000_000+opt.seed,adapter=ref_adapter)
+        heldout=collect_fragment(ref_env,agent,args,opt.reference_steps,3,reset_seed=3_100_000+opt.seed,adapter=ref_adapter)
         total_steps+=reference['steps']+heldout['steps']
-        g_ref=signature(agent,reference,'cpu')
+        adv_scale=max(float(reference['advantages'].std(unbiased=False)),1e-6)
+        g_ref=signature(agent,reference,'cpu',adv_scale=adv_scale)
         fisher=empirical_fisher_diagonal(agent,reference['obs'],reference['actions'])
         occ=occupancy_scores(regionizer,reference['obs'])
-        baseline=evaluate_policy(oracle_env,agent,opt.eval_episodes,'cpu',seed_base=3_200_000+opt.seed)
+        baseline=evaluate_policy(oracle_env,agent,opt.eval_episodes,'cpu',seed_base=3_200_000+opt.seed,adapter=oracle_adapter)
         total_steps+=baseline['eval_steps']
-        adv=heldout['advantages'];adv=(adv-adv.mean())/(adv.std(unbiased=False)+1e-8)
+        adv=heldout['advantages']  # raw, matches signature convention
         def surrogate(policy):
             with torch.no_grad():
                 logp=policy.get_distribution(heldout['obs']).log_prob(heldout['actions']).sum(-1)
                 return float(((logp-heldout['logprobs']).exp()*adv).mean())
         base_surrogate=surrogate(agent)
         logger=CsvLogger(out/'p.csv');rows=[]
+        eta=getattr(args,'hybrid_eta',0.5); eps_h=getattr(args,'eps_hybrid',1e-6)
         for region in candidates:
             snap=archive.sample_snapshot(region)
-            batch=concat_batches([collect_fragment(env,agent,args,opt.region_steps,2,start_snapshot=snap)
+            batch=concat_batches([collect_fragment(env,agent,args,opt.region_steps,2,start_snapshot=snap,adapter=adapter)
                                   for _ in range(opt.region_rollouts)])
             total_steps+=batch['steps']
-            g=signature(agent,batch,'cpu')
+            g=signature(agent,batch,'cpu',adv_scale=adv_scale)
             dot=float(g_ref@g)
             cosine=dot/max(float(g.norm()*g_ref.norm()),1e-12)
             natural=float(g_ref@(g/(fisher+args.fisher_damping)))
+            occ_val=float(occ[region.region_id])
+            hybrid=(occ_val+eps_h)**eta*(max(0.,cosine)+eps_h)**(1.-eta)
             clone=copy.deepcopy(agent)
             with torch.no_grad():
                 offset=0
                 for param in signature_parameters(clone):
                     param.add_(g[offset:offset+param.numel()].view_as(param),alpha=-opt.step_size)
                     offset+=param.numel()
-            after=evaluate_policy(oracle_env,clone,opt.eval_episodes,'cpu',seed_base=3_200_000+opt.seed)
+            after=evaluate_policy(oracle_env,clone,opt.eval_episodes,'cpu',seed_base=3_200_000+opt.seed,adapter=oracle_adapter)
             total_steps+=after['eval_steps']
-            row=dict(region_id=region.region_id,occupancy=float(occ[region.region_id]),cosine=cosine,dot=dot,
-                     fisher=natural,gradient_norm=float(g.norm()),delta_return=after['eval_return']-baseline['eval_return'],
+            row=dict(region_id=region.region_id,occupancy=occ_val,cosine=cosine,dot=dot,
+                     fisher=natural,hybrid=hybrid,gradient_norm=float(g.norm()),
+                     delta_return=after['eval_return']-baseline['eval_return'],
                      delta_success=after['eval_success']-baseline['eval_success'],
                      delta_surrogate=surrogate(clone)-base_surrogate,region_steps=batch['steps'])
             rows.append(row);logger.log(row);print(json.dumps(row),flush=True)
         summary['p']={key:{target:correlation([r[key] for r in rows],[r[target] for r in rows])
                           for target in ('delta_return','delta_surrogate')}
-                      for key in ('occupancy','cosine','dot','fisher')}
-        fig,axes=plt.subplots(1,4,figsize=(12,3))
-        for ax,key in zip(axes,('occupancy','cosine','dot','fisher')):
+                      for key in ('occupancy','cosine','dot','fisher','hybrid')}
+        fig,axes=plt.subplots(1,5,figsize=(15,3))
+        for ax,key in zip(axes,('occupancy','cosine','dot','fisher','hybrid')):
             ax.scatter([r[key] for r in rows],[r['delta_return'] for r in rows])
             rho=summary['p'][key]['delta_return']['rho']
             ax.set(xlabel=key,ylabel='Paired change in return',title=f'rho={rho:.2f}' if rho is not None else 'Undefined correlation')
         fig.tight_layout();fig.savefig(out/'p_correlation.pdf');fig.savefig(out/'p_correlation.png',dpi=180);plt.close(fig)
     summary['diagnostic_env_steps']=total_steps
     (out/'summary.json').write_text(json.dumps(summary,indent=2,allow_nan=False))
-    for instance in (env,ref_env,oracle_env):instance.close()
+    for a in (adapter,ref_adapter,oracle_adapter):a.close()
 
 
 if __name__=='__main__':main()
