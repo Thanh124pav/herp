@@ -1,4 +1,16 @@
-"""Independent high-K sigma oracle and actual one-step region-update diagnostics."""
+"""Independent high-K sigma oracle and controlled PPO-delta region diagnostics.
+
+The p mechanism test follows IMPL §25 controlled PPO-delta rather than the older
+one-step SGD proxy:
+
+    theta_A = PPOUpdate(theta, D_base)
+    theta_B = PPOUpdate(theta, D_base U D_v)
+    Delta_v = J_ref(theta_B) - J_ref(theta_A)
+
+Both clones share the same starting checkpoint, the same PPO hyperparameters and
+the same optimizer state, so Delta_v isolates the marginal contribution of
+adding region v's data on top of an ordinary PPO update.
+"""
 import argparse
 import copy
 import json
@@ -13,7 +25,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from train import (Args, Agent, build_adapter, collect_fragment, concat_batches, signature, occupancy_scores,
-                   empirical_fisher_diagonal, signature_parameters, evaluate_policy)
+                   empirical_fisher_diagonal, evaluate_policy, ppo_update)
 from herp.probe import probe_region
 from herp.logging import CsvLogger
 
@@ -36,7 +48,10 @@ def main():
     parser.add_argument('--region-steps',type=int,default=64)
     parser.add_argument('--region-rollouts',type=int,default=1)
     parser.add_argument('--eval-episodes',type=int,default=50)
-    parser.add_argument('--step-size',type=float,default=.001)
+    # Retained for backward compatibility with older logs; the controlled PPO-delta
+    # test does not use a raw SGD step, so --step-size is now ignored.
+    parser.add_argument('--step-size',type=float,default=.001,
+                        help='Deprecated: unused by controlled PPO-delta.')
     parser.add_argument('--seed',type=int,default=710)
     parser.add_argument('--output-dir',default='outputs/mechanisms')
     opt=parser.parse_args()
@@ -93,6 +108,8 @@ def main():
             fig.suptitle('Low/high dispersion: future trajectories in shared state PCA coordinates')
             fig.tight_layout();fig.savefig(out/'sigma_futures.pdf');plt.close(fig)
     if opt.kind in ('p','both'):
+        # D_base -- an ordinary PPO batch that both clones will train on.
+        # A held-out fragment stays around only for the Taylor surrogate check.
         reference=collect_fragment(ref_env,agent,args,opt.reference_steps,3,reset_seed=3_000_000+opt.seed,adapter=ref_adapter)
         heldout=collect_fragment(ref_env,agent,args,opt.reference_steps,3,reset_seed=3_100_000+opt.seed,adapter=ref_adapter)
         total_steps+=reference['steps']+heldout['steps']
@@ -100,14 +117,36 @@ def main():
         g_ref=signature(agent,reference,'cpu',adv_scale=adv_scale)
         fisher=empirical_fisher_diagonal(agent,reference['obs'],reference['actions'])
         occ=occupancy_scores(regionizer,reference['obs'])
-        baseline=evaluate_policy(oracle_env,agent,opt.eval_episodes,'cpu',seed_base=3_200_000+opt.seed,adapter=oracle_adapter)
-        total_steps+=baseline['eval_steps']
+        optimizer_state=cp.get('optimizer')  # share exact optimizer state across clones
         adv=heldout['advantages']  # raw, matches signature convention
         def surrogate(policy):
             with torch.no_grad():
                 logp=policy.get_distribution(heldout['obs']).log_prob(heldout['actions']).sum(-1)
                 return float(((logp-heldout['logprobs']).exp()*adv).mean())
         base_surrogate=surrogate(agent)
+
+        def ppo_clone(base_batch,extra_batch,ppo_seed):
+            """Return (theta', eval_dict) after one PPO update on base_batch (+ optional extra)."""
+            clone=copy.deepcopy(agent)
+            optimizer=torch.optim.Adam(clone.parameters(),lr=args.learning_rate,eps=1e-5)
+            if optimizer_state is not None:
+                try:
+                    optimizer.load_state_dict(copy.deepcopy(optimizer_state))
+                except Exception:
+                    pass
+            batch=base_batch if extra_batch is None else concat_batches([base_batch,extra_batch])
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(ppo_seed)
+                ppo_metrics=ppo_update(clone,optimizer,batch,args)
+            evald=evaluate_policy(oracle_env,clone,opt.eval_episodes,'cpu',
+                                  seed_base=3_200_000+opt.seed,adapter=oracle_adapter)
+            return clone,ppo_metrics,evald
+
+        # Clone A -- ordinary PPO update on D_base (same for every region).
+        clone_A,ppo_A_metrics,eval_A=ppo_clone(reference,None,ppo_seed=opt.seed+7919)
+        surrogate_A=surrogate(clone_A)
+        total_steps+=eval_A['eval_steps']
+
         logger=CsvLogger(out/'p.csv');rows=[]
         eta=getattr(args,'hybrid_eta',0.5); eps_h=getattr(args,'eps_hybrid',1e-6)
         for region in candidates:
@@ -121,28 +160,31 @@ def main():
             natural=float(g_ref@(g/(fisher+args.fisher_damping)))
             occ_val=float(occ[region.region_id])
             hybrid=(occ_val+eps_h)**eta*(max(0.,cosine)+eps_h)**(1.-eta)
-            clone=copy.deepcopy(agent)
-            with torch.no_grad():
-                offset=0
-                for param in signature_parameters(clone):
-                    param.add_(g[offset:offset+param.numel()].view_as(param),alpha=-opt.step_size)
-                    offset+=param.numel()
-            after=evaluate_policy(oracle_env,clone,opt.eval_episodes,'cpu',seed_base=3_200_000+opt.seed,adapter=oracle_adapter)
-            total_steps+=after['eval_steps']
+            # Clone B -- PPO update on D_base U D_v with matched hyperparameters.
+            clone_B,ppo_B_metrics,eval_B=ppo_clone(reference,batch,ppo_seed=opt.seed+7919)
+            surrogate_B=surrogate(clone_B)
+            total_steps+=eval_B['eval_steps']
             row=dict(region_id=region.region_id,occupancy=occ_val,cosine=cosine,dot=dot,
                      fisher=natural,hybrid=hybrid,gradient_norm=float(g.norm()),
-                     delta_return=after['eval_return']-baseline['eval_return'],
-                     delta_success=after['eval_success']-baseline['eval_success'],
-                     delta_surrogate=surrogate(clone)-base_surrogate,region_steps=batch['steps'])
+                     ppo_delta_return=eval_B['eval_return']-eval_A['eval_return'],
+                     ppo_delta_success=eval_B['eval_success']-eval_A['eval_success'],
+                     ppo_delta_surrogate=surrogate_B-surrogate_A,
+                     eval_A_return=eval_A['eval_return'],eval_B_return=eval_B['eval_return'],
+                     eval_A_success=eval_A['eval_success'],eval_B_success=eval_B['eval_success'],
+                     region_steps=batch['steps'])
             rows.append(row);logger.log(row);print(json.dumps(row),flush=True)
         summary['p']={key:{target:correlation([r[key] for r in rows],[r[target] for r in rows])
-                          for target in ('delta_return','delta_surrogate')}
+                          for target in ('ppo_delta_return','ppo_delta_success','ppo_delta_surrogate')}
                       for key in ('occupancy','cosine','dot','fisher','hybrid')}
+        summary['p_reference']={'eval_A_return':eval_A['eval_return'],
+                                'eval_A_success':eval_A['eval_success'],
+                                'ppo_metrics_A':ppo_A_metrics}
         fig,axes=plt.subplots(1,5,figsize=(15,3))
         for ax,key in zip(axes,('occupancy','cosine','dot','fisher','hybrid')):
-            ax.scatter([r[key] for r in rows],[r['delta_return'] for r in rows])
-            rho=summary['p'][key]['delta_return']['rho']
-            ax.set(xlabel=key,ylabel='Paired change in return',title=f'rho={rho:.2f}' if rho is not None else 'Undefined correlation')
+            ax.scatter([r[key] for r in rows],[r['ppo_delta_return'] for r in rows])
+            rho=summary['p'][key]['ppo_delta_return']['rho']
+            ax.set(xlabel=key,ylabel='PPO delta return (J_ref(B) - J_ref(A))',
+                   title=f'rho={rho:.2f}' if rho is not None else 'Undefined correlation')
         fig.tight_layout();fig.savefig(out/'p_correlation.pdf');fig.savefig(out/'p_correlation.png',dpi=180);plt.close(fig)
     summary['diagnostic_env_steps']=total_steps
     (out/'summary.json').write_text(json.dumps(summary,indent=2,allow_nan=False))
