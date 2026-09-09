@@ -1,0 +1,3 @@
+benchmark: fetch
+env_id: FetchPickAndPlace-v4
+reward_mode: dense

@@ -34,9 +34,13 @@ def main():
             raise ValueError(f'Mismatched backbone/evaluation settings in {run}')
         backbone_configs[backbone_key]=backbone
         provenance=json.loads((run/'provenance.json').read_text())
-        if backbone_key in provenance_by_group and provenance_by_group[backbone_key]!=provenance:
+        # Only enforce that source code and simulator versions match across the group;
+        # seed / total_timesteps / device may legitimately vary per run.
+        provenance_key={k:provenance[k] for k in ('source_hashes','benchmark','benchmark_version',
+                                                  'torch','python','numpy') if k in provenance}
+        if backbone_key in provenance_by_group and provenance_by_group[backbone_key]!=provenance_key:
             raise ValueError(f'Implementation changed within comparison group: {run}')
-        provenance_by_group[backbone_key]=provenance
+        provenance_by_group[backbone_key]=provenance_key
         unique=(*key,cfg['seed'])
         if unique in seen:raise ValueError(f'Duplicate completed seed: {unique}')
         seen.add(unique)

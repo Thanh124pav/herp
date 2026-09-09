@@ -1,0 +1,5 @@
+# Meta-World stub — the adapter is not implemented; runs will fail with a clear
+# NotImplementedError until src/herp/envs/metaworld.py is completed (Phase 3).
+benchmark: metaworld
+env_id: button-press-v3
+reward_mode: dense

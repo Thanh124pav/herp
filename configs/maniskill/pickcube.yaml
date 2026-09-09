@@ -1,4 +1,5 @@
-env_id: PushCube-v1
+benchmark: maniskill
+env_id: PickCube-v1
 control_mode: pd_ee_delta_pose
 obs_mode: state
 reward_mode: dense

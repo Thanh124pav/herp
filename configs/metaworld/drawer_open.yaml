@@ -1,0 +1,3 @@
+benchmark: metaworld
+env_id: drawer-open-v3
+reward_mode: dense

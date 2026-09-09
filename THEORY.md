@@ -1,32 +1,47 @@
-# HERP Theory: Performance-Aware Exploration of Trajectory Space
+# HERP THEORY.md
 
-**Target:** ICRA 2027  
-**Status:** implementation-facing theory draft; freeze the core formulation first, then only add theory that is experimentally testable.
+## 0. Scope
 
-## 1. Core research question
+**Target venue:** ICRA 2027  
+**Paper scope:** online robot reinforcement learning with a fixed interaction budget.
 
-In online reinforcement learning, a fixed interaction budget should not be spent uniformly over trajectory space. Different state regions have different roles:
+HERP addresses the question:
 
-1. **Exploration need:** some states are branching points, where nearby actions or stochastic dynamics lead to substantially different future trajectories.
-2. **Performance relevance:** some states produce policy updates that are much more aligned with the optimization direction that improves performance under the target/deployment distribution.
+> Given a limited online interaction budget, which previously reached regions of trajectory space should receive additional rollouts so that downstream evaluation performance improves most?
 
-HERP allocates extra rollout budget to regions that are simultaneously **branching** and **performance-relevant**.
+The central hypothesis is that different trajectory-space regions should not receive equal interaction budget.
 
-The core question is:
+Some regions should be explored more because they are **branching states**: small action changes lead to substantially different futures.
 
-> Given an interaction budget \(B\), from which previously reached state regions should the current policy collect additional on-policy rollouts to maximize downstream evaluation performance?
+Other regions are more important because updates collected there are more relevant to the policy behavior required under the target evaluation distribution.
 
-The working allocation rule is
+HERP therefore assigns rollout budget using two online quantities:
 
 \[
-n_v^\star \propto p_v \sigma_v,
+\sigma_v
 \]
 
-where \(v\) indexes a region of trajectory space, \(p_v\) measures performance relevance, and \(\sigma_v\) measures future-trajectory branching / uncertainty.
+for **future branching / exploration need**, and
+
+\[
+p_v
+\]
+
+for **performance relevance**.
+
+The final allocation rule is
+
+\[
+\boxed{
+n_v^\star \propto p_v \sigma_v
+}
+\]
+
+subject to a fixed interaction budget.
 
 ---
 
-## 2. Problem setup
+# 1. Problem formulation
 
 Consider an MDP
 
@@ -34,114 +49,141 @@ Consider an MDP
 \mathcal M=(\mathcal S,\mathcal A,P,r,\gamma,\rho_0)
 \]
 
-with policy \(\pi_\theta(a\mid s)\). Training proceeds online. The simulator permits saving and restoring environment states that have already been reached by the agent.
-
-Let
+with stochastic policy
 
 \[
-\mathcal V_t=\{v_1,\ldots,v_{K_t}\}
+\pi_\theta(a\mid s).
 \]
 
-be an adaptive partition of the currently discovered trajectory space. A region \(v\) contains a set of related states and an archive of simulator snapshots
+Training is online. The agent starts ordinary episodes from the environment initial-state distribution \(\rho_0\), but it may also restore previously visited simulator states.
+
+Let the set of discovered trajectory-space regions at training round \(t\) be
 
 \[
-\mathcal A_v=\{x_{v,1},\ldots,x_{v,M_v}\}.
+\mathcal V_t=\{v_1,\dots,v_{K_t}\}.
 \]
 
-A snapshot contains enough simulator state to restore the environment exactly enough for short future rollouts.
-
-At allocation round \(t\), HERP has an additional rollout budget \(B_t\). It selects
+Each region \(v\) stores an archive
 
 \[
-n_v \in \mathbb N_0,\qquad \sum_{v\in\mathcal V_t}n_v\le B_t.
+\mathcal A_v=\{x_{v,1},\dots,x_{v,M_v}\},
 \]
 
-Each selected rollout is initialized from a stored state in region \(v\), then executed using the **current** policy \(\pi_{\theta_t}\). Therefore, the rollout is on-policy with respect to the action-generating policy, although its initial-state distribution is deliberately changed.
+where each \(x_{v,i}\) is an environment snapshot corresponding to a state actually reached by the policy during online interaction.
+
+At a reallocation round, HERP selects
+
+\[
+n_v \ge 0
+\]
+
+additional rollout steps or fragments for each region, subject to
+
+\[
+\sum_{v\in\mathcal V_t} n_v \le B_t.
+\]
+
+All probe rollouts, reference rollouts, and allocated rollouts count toward the same online interaction budget.
 
 ---
 
-## 3. Region representation
+# 2. Region representation
 
-For the ICRA implementation, use a simple representation first.
-
-For each state \(s\), define
+A benchmark-specific adapter exposes a task-state feature map
 
 \[
-z(s)=\phi(s)\in\mathbb R^d,
+\phi:\mathcal S\rightarrow\mathbb R^d.
 \]
 
-where \(\phi\) is one of:
+For a state \(s\),
 
-1. normalized privileged state features from ManiSkill `state` / `state_dict`;
-2. task-relevant state features plus robot proprioception;
-3. later, a learned encoder if needed.
+\[
+z(s)=\phi(s).
+\]
 
-A state belongs to region \(v\) if its representation is close to the region centroid \(c_v\). An online radius-based or k-center clustering rule is sufficient for the first version.
+The online regionizer uses normalized features and radius-based assignment. If
 
-The theoretical formulation does **not** require a particular clustering algorithm. It only requires that each region be sufficiently local that its future-trajectory statistics are meaningful.
+\[
+\min_v \|z(s)-c_v\|_2 > r
+\]
+
+and the maximum number of regions has not been reached, a new region is created. Otherwise, the state is assigned to the nearest region.
+
+For the ICRA version, no learned region encoder is required.
 
 ---
 
-# Part I. Exploration need: \(\sigma_v\)
+# 3. Exploration need: \(\sigma_v\)
 
-## 4. What \(\sigma_v\) should mean
+## 3.1 Desired meaning
 
-The desired quantity is not merely state novelty.
+HERP defines \(\sigma_v\) to capture:
 
-We want \(\sigma_v\) to answer:
+> how strongly the future trajectory distribution changes when the agent makes different local action choices from region \(v\).
 
-> If the agent reaches region \(v\), how many qualitatively different futures are accessible from this region under small changes in action or environment stochasticity?
+This is deliberately different from pure state novelty.
 
-A high-\(\sigma_v\) region is a **branching region**. Additional rollouts there are useful because one trajectory is an insufficient description of what can happen next.
-
-A low-\(\sigma_v\) region is locally predictable. Repeating many rollouts from it provides redundant information.
+A region should have high \(\sigma_v\) when it behaves like a decision point or branch point. A region should have low \(\sigma_v\) when repeated local rollouts produce nearly redundant futures.
 
 ---
 
-## 5. Main estimator: future-trajectory dispersion
+# 4. Multi-step future trajectory representation
 
-From a stored state \(x_v\), run \(K\) short probe rollouts of horizon \(H\):
+From an archived snapshot \(x_v\), collect short probe futures
 
 \[
-\tau^{+}_{v,k}
-=
-(s_{0}^{(k)},a_{0}^{(k)},s_{1}^{(k)},\ldots,s_H^{(k)}),
-\qquad k=1,\ldots,K,
+\tau_{v,k}^{+}=(s_1^{(k)},\dots,s_H^{(k)}).
 \]
 
-with \(s_0^{(k)}=x_v\).
-
-Compress each future into a trajectory feature
+Compress each future into
 
 \[
-Z_{v,k}
-=
-\Psi(\tau^{+}_{v,k}).
+Z_{v,k}=\Psi(\tau_{v,k}^{+}),
 \]
 
-The simplest implementation is a discounted mean of normalized state features:
+where
 
 \[
-Z_{v,k}
+\Psi(\tau_{v,k}^{+})
 =
 \frac{
-\sum_{h=1}^{H}\gamma_b^{h-1}\phi(s_h^{(k)})
+\sum_{h=1}^{H}
+\gamma_b^{h-1}\phi(s_h^{(k)})
 }{
-\sum_{h=1}^{H}\gamma_b^{h-1}
+\sum_{h=1}^{H}
+\gamma_b^{h-1}
 }.
 \]
 
-Then define pairwise future dispersion
+Here \(\gamma_b\in(0,1]\) controls how strongly nearby future states are weighted.
+
+---
+
+# 5. Main \(\sigma_v\) estimator
+
+The default estimator is pairwise future dispersion:
 
 \[
-\hat\sigma_{v,\text{pair}}^2
+\hat\sigma_{v,\mathrm{pair}}^2
 =
 \frac{1}{2K(K-1)}
-\sum_{i\ne j}
+\sum_{i\neq j}
 \|Z_{v,i}-Z_{v,j}\|_2^2.
 \]
 
-Using the variance identity,
+Equivalently,
+
+\[
+\hat\sigma_{v,\mathrm{pair}}
+=
+\sqrt{
+\frac{1}{2K(K-1)}
+\sum_{i\neq j}
+\|Z_{v,i}-Z_{v,j}\|_2^2
+}.
+\]
+
+Using
 
 \[
 \frac12\mathbb E\|Z-Z'\|_2^2
@@ -149,32 +191,23 @@ Using the variance identity,
 \operatorname{tr}\operatorname{Cov}(Z),
 \]
 
-this is an empirical estimate of future-trajectory variance.
-
-### Interpretation
-
-- If all probe rollouts stay close, \(\hat\sigma_v\) is small.
-- If the futures diverge into different modes, \(\hat\sigma_v\) is large.
-- The score is explicitly multi-step, unlike one-step prediction error.
-
-This should be the **first estimator implemented**.
+this is a multi-step future-dispersion statistic.
 
 ---
 
-## 6. Preferred refinement: separate controllable branching from stochastic noise
+# 6. Controllable branching decomposition
 
-A weakness of naive curiosity is the "noisy-TV" problem: unpredictable but uncontrollable randomness can receive a high exploration score.
+A refined version separates:
 
-HERP can explicitly separate two sources of future variance.
+1. action-sensitive branching,
+2. uncontrollable environment randomness.
 
-Let \(q_\delta(a_{0:H-1}\mid x_v)\) be a local action-probe distribution around the current policy. Draw \(A\) action probes. For each action probe, if the environment is stochastic, repeat it \(M\) times with different environment random seeds.
+Let \(a\in\{1,\dots,A\}\) index local action probes and \(m\in\{1,\dots,M\}\) repeated environment trials.
 
 Let
 
 \[
-Z_{v,a,m}
-=
-\Psi(\tau^+_{v,a,m}).
+Z_{v,a,m}=\Psi(\tau_{v,a,m}^{+}).
 \]
 
 Define
@@ -182,17 +215,30 @@ Define
 \[
 \bar Z_{v,a}
 =
-\frac1M\sum_{m=1}^M Z_{v,a,m},
+\frac1M
+\sum_{m=1}^M Z_{v,a,m},
 \qquad
 \bar Z_v
 =
-\frac1A\sum_{a=1}^A \bar Z_{v,a}.
+\frac1A
+\sum_{a=1}^A
+\bar Z_{v,a}.
 \]
 
-### Environment / aleatoric variance
+The controllable branching component is
 
 \[
-\hat\sigma^2_{\text{dyn},v}
+\hat\sigma_{\mathrm{branch},v}^2
+=
+\frac1A
+\sum_{a=1}^A
+\|\bar Z_{v,a}-\bar Z_v\|_2^2.
+\]
+
+The environment-noise component is
+
+\[
+\hat\sigma_{\mathrm{dyn},v}^2
 =
 \frac1A
 \sum_{a=1}^A
@@ -201,147 +247,113 @@ Define
 \|Z_{v,a,m}-\bar Z_{v,a}\|_2^2.
 \]
 
-### Action-sensitive / controllable branching variance
-
-\[
-\hat\sigma^2_{\text{branch},v}
-=
-\frac1A
-\sum_{a=1}^A
-\|\bar Z_{v,a}-\bar Z_v\|_2^2.
-\]
-
-This is a law-of-total-variance decomposition:
+Thus,
 
 \[
 \operatorname{Var}(Z\mid v)
 =
-\mathbb E_A[
-\operatorname{Var}(Z\mid v,A)
-]
+\mathbb E_A[\operatorname{Var}(Z\mid v,A)]
 +
-\operatorname{Var}_A(
-\mathbb E[Z\mid v,A]
-).
+\operatorname{Var}_A[\mathbb E(Z\mid v,A)].
 \]
 
-For HERP, the **main exploration score should be**
+HERP may use
 
 \[
+\boxed{
 \sigma_v
 =
 \sqrt{
-\hat\sigma^2_{\text{branch},v}
+\hat\sigma_{\mathrm{branch},v}^2
 +
-\lambda_{\text{dyn}}\hat\sigma^2_{\text{dyn},v}
-},
+\lambda_{\mathrm{dyn}}
+\hat\sigma_{\mathrm{dyn},v}^2
+}
+}
 \]
 
-with \(\lambda_{\text{dyn}}\in[0,1]\). Start with
-
-\[
-\lambda_{\text{dyn}}=0
-\]
-
-in deterministic simulators. This prioritizes states where different controllable choices genuinely create different futures, instead of rewarding irreducible noise.
+with \(\lambda_{\mathrm{dyn}}\in[0,1]\). For deterministic simulation benchmarks, start with \(\lambda_{\mathrm{dyn}}=0\).
 
 ---
 
-## 7. Alternative \(\sigma_v\) estimators to ablate
+# 7. Probe design
 
-### 7.1 Return dispersion
+For a stored state \(x_v\), let \(\mu_\theta(s)\) and \(\sigma_\theta(s)\) denote Gaussian PPO policy parameters.
+
+HERP perturbs the first action:
 
 \[
-\sigma^2_{R,v}
+a_0^{(k)}
 =
-\operatorname{Var}_{k}
+\mu_\theta(s_0)
++
+c\sigma_\theta(s_0)\epsilon_k,
+\qquad
+\epsilon_k\sim\mathcal N(0,I).
+\]
+
+After the first action, the probe follows the current policy.
+
+For branch decomposition, continuation policy noise may be shared across action groups so that between-group differences primarily reflect the first local action choice.
+
+Probe rollouts count toward the global environment-step budget.
+
+---
+
+# 8. Alternative \(\sigma_v\) estimators
+
+## 8.1 Return dispersion
+
+\[
+\sigma_{R,v}^2
+=
+\operatorname{Var}
 \left[
 \sum_{h=0}^{H-1}
-\gamma^h r_{h}^{(k)}
+\gamma^h r_h
 +
-\gamma^H V_\theta(s_H^{(k)})
+\gamma^H V_\theta(s_H)
 \right].
 \]
 
-Pros:
-- directly task-aware;
-- cheap.
+## 8.2 Dynamics-ensemble disagreement
 
-Cons:
-- can miss geometrically different futures with currently similar value.
+With forward models \(f_j(s,a)\),
 
-### 7.2 Per-trajectory gradient variance
+\[
+\sigma_{\mathrm{ens},v}^2
+=
+\mathbb E_{(s,a)\sim v}
+\operatorname{Var}_j[f_j(s,a)].
+\]
 
-Let
+## 8.3 Gradient variance oracle
+
+For mechanism validation only,
 
 \[
 G_{v,k}
 =
-\nabla_\theta \ell(\theta;\tau^+_{v,k}).
+\nabla_{\theta_\pi}
+\ell_\pi(\theta;\tau_{v,k}),
 \]
 
-Define
+and
 
 \[
-\sigma^2_{g,v}
+\sigma_{g,v}^2
 =
-\frac1K
-\sum_k
-\|G_{v,k}-\bar G_v\|_2^2.
+\operatorname{tr}
+\operatorname{Cov}[G_v].
 \]
 
-This is theoretically the cleanest choice for the Neyman-allocation result below, but it is more expensive and less directly connected to the "branching state" story.
-
-Use it as an **oracle / diagnostic** or compute it on the policy head only.
-
-### 7.3 Dynamics-ensemble disagreement
-
-Train an ensemble
-
-\[
-f_j(s,a)\approx \phi(s')
-\]
-
-and define
-
-\[
-\sigma^2_{\text{ens},v}
-=
-\mathbb E_{(s,a)\sim v}
-\operatorname{Var}_{j}
-[f_j(s,a)].
-\]
-
-This directly connects to Self-Supervised Exploration via Disagreement. It is a strong baseline and an alternative HERP estimator.
-
-### 7.4 Distributional trajectory discrepancy
-
-Replace Euclidean distance by MMD, energy distance, Wasserstein approximation, or Jensen-Shannon divergence after discretization / density modeling:
-
-\[
-\sigma_v^{\text{dist}}
-=
-D(
-P(\Psi(\tau^+)\mid v),
-\text{reference distribution}
-).
-\]
-
-Do not make this the first implementation unless Euclidean trajectory features fail.
+This is diagnostic, not part of the main allocator.
 
 ---
 
-# Part II. Connection to the Simulation Lemma
+# 9. Connection to the Simulation Lemma
 
-## 8. Lobel-Parr tight simulation-lemma bound
-
-Lobel and Parr (RLC 2024, arXiv:2406.16249) consider two MDPs whose transition kernels differ by at most
-
-\[
-\epsilon_T
-\]
-
-in \(L_1\), with reward error \(\epsilon_R\). They derive the tight discounted value-error bound
+Lobel and Parr derive a tight discounted Simulation-Lemma bound. Let \(\epsilon_T\) be an \(L_1\) transition-kernel mismatch and \(\epsilon_R\) reward mismatch. Their bound can be written as
 
 \[
 |V^\pi(s)-\hat V^\pi(s)|
@@ -352,7 +364,7 @@ in \(L_1\), with reward error \(\epsilon_R\). They derive the tight discounted v
 {1-\gamma(1-\epsilon_T/2)}.
 \]
 
-When \(\epsilon_R=0\),
+For \(\epsilon_R=0\),
 
 \[
 B_\gamma(\epsilon_T)
@@ -363,267 +375,253 @@ B_\gamma(\epsilon_T)
 {1-\gamma(1-\epsilon_T/2)}.
 \]
 
-This quantity is monotone in transition mismatch.
+HERP does not claim that Euclidean trajectory dispersion is itself \(\epsilon_T\). Instead, this motivates the principle that local transition uncertainty can induce non-uniform value uncertainty.
 
-### How HERP can use this correctly
-
-The paper does **not** directly prove that pairwise future-trajectory distance is equal to \(\epsilon_T\). Therefore, HERP should not claim that the pairwise trajectory score itself is the Simulation Lemma error.
-
-Instead define a local set of plausible transition models
+If an ensemble provides a local transition-confidence quantity \(\hat\epsilon_{T,v}\), an optional score is
 
 \[
-\mathcal P_v
-\]
-
-from a dynamics ensemble or empirical confidence set. Let
-
-\[
-\hat\epsilon_{T,v}
-=
-\sup_{P_i,P_j\in\mathcal P_v}
-\|P_i(\cdot\mid v)-P_j(\cdot\mid v)\|_1.
-\]
-
-Then an optional bound-shaped exploration score is
-
-\[
-\sigma^{\text{SL}}_v
+\sigma_v^{\mathrm{SL}}
 =
 B_\gamma(\hat\epsilon_{T,v}).
 \]
 
-This gives a principled mapping from local transition-model uncertainty to worst-case policy-value uncertainty.
-
-### Recommended use in ICRA
-
-Use the Lobel-Parr result as:
-
-1. theoretical motivation that transition uncertainty is not equally consequential for value;
-2. an optional ensemble-based \(\sigma_v^{\text{SL}}\) ablation;
-3. a reason to use a nonlinear value-sensitivity mapping rather than only raw transition error.
-
-Do **not** make the entire paper depend on proving that trajectory dispersion exactly estimates the Simulation-Lemma \(\epsilon_T\).
+This is an ablation/theory-supporting option only.
 
 ---
 
-# Part III. Performance relevance: \(p_v\)
+# 10. Performance relevance: \(p_v\)
 
-## 9. Training-time reference objective
+## 10.1 Desired meaning
 
-Do not use the final held-out benchmark test set during training.
+HERP defines \(p_v\) as:
 
-Instead maintain a small **training-time reference distribution** \(\mathcal D_{\mathrm{ref}}\), collected from normal environment resets and standard current-policy rollouts under the target task distribution.
+> how useful policy updates induced by data from region \(v\) are for improving policy behavior under the target training-time reference distribution.
 
-The final paper evaluation must use disjoint seeds / task instances.
+The held-out test set is never used to compute \(p_v\).
 
-Let the policy loss on the reference batch be
+---
+
+# 11. Training-time reference distribution
+
+Maintain a small reference batch
 
 \[
-L_{\mathrm{ref}}(\theta).
+\mathcal D_{\mathrm{ref}}
 \]
+
+collected from ordinary environment resets under the current policy.
+
+The reference distribution uses separate training-time seeds, no archived-state reset, and no HERP prioritization.
 
 Define
 
 \[
 g_{\mathrm{ref}}
 =
-\nabla_\theta L_{\mathrm{ref}}(\theta).
+\nabla_{\theta_\pi}
+L_{\mathrm{ref}}^\pi(\theta).
 \]
 
-For region \(v\), collect a small on-policy batch \(\mathcal D_v\) and compute
+Only policy parameters are used for \(p_v\); the critic is excluded.
+
+---
+
+# 12. PPO-consistent regional gradient
+
+For region \(v\), collect a current-policy rollout batch \(\mathcal D_v\) and define
 
 \[
 g_v
 =
-\nabla_\theta L_v(\theta).
+\nabla_{\theta_\pi}
+L_v^\pi(\theta).
 \]
+
+The implementation must use the full actor parameter set, not only the actor head.
+
+Advantage normalization must be consistent between regional and reference gradient computation. Do not independently zero-mean every tiny region batch if that changes the update direction relative to actual PPO.
+
+Use
+
+\[
+L_{\mathrm{sig}}(D)
+=
+-
+\mathbb E[
+\log\pi_\theta(a\mid s)\hat A
+].
+\]
+
+Advantages should use a shared running or scoring-round normalization scale.
 
 ---
 
-## 10. First-order gradient-alignment score
+# 13. First-order performance relevance
 
-Suppose a small update using region \(v\) is
+For a small update
 
 \[
 \theta^+
 =
-\theta-\eta g_v.
+\theta-\eta g_v,
 \]
 
-A Taylor expansion gives
+Taylor expansion gives
 
 \[
-L_{\mathrm{ref}}(\theta^+)
-\approx
-L_{\mathrm{ref}}(\theta)
+L_{\mathrm{ref}}^\pi(\theta^+)
+=
+L_{\mathrm{ref}}^\pi(\theta)
 -
 \eta
+g_{\mathrm{ref}}^\top g_v
++
+O(\eta^2).
+\]
+
+Thus
+
+\[
+u_v^{\mathrm{dot}}
+=
 g_{\mathrm{ref}}^\top g_v.
 \]
 
-Therefore
+A scale-normalized alternative is
 
 \[
-u_v^{\mathrm{FO}}
-=
-g_{\mathrm{ref}}^\top g_v
-\]
-
-is a first-order estimate of how helpful an update on region \(v\) is for the reference objective.
-
-A scale-insensitive alternative is cosine alignment:
-
-\[
-c_v
+u_v^{\mathrm{cos}}
 =
 \frac{
 g_{\mathrm{ref}}^\top g_v
 }{
-\|g_{\mathrm{ref}}\|_2\|g_v\|_2+\epsilon
+\|g_{\mathrm{ref}}\|_2
+\|g_v\|_2
++
+\epsilon
 }.
 \]
 
-For the main implementation define
+Use
 
 \[
 \tilde p_v
 =
-[\operatorname{EMA}(c_v)]_+ + \epsilon_p,
+[\operatorname{EMA}(u_v)]_+
++
+\epsilon_p.
 \]
 
-and normalize
+Then normalize
 
 \[
 p_v
 =
-\frac{\tilde p_v^\alpha}
-{\sum_u \tilde p_u^\alpha}.
+\frac{
+\tilde p_v^\alpha
+}{
+\sum_u
+\tilde p_u^\alpha
+}.
 \]
-
-This makes \(p_v\) a probability-like performance-relevance distribution.
-
-### Important distinction
-
-Gradient alignment is a **first-order influence proxy**, not a full influence function.
 
 ---
 
-## 11. Influence-function version
+# 14. Occupancy relevance
 
-For a training objective with Hessian
-
-\[
-H_\theta
-=
-\nabla_\theta^2 L_{\mathrm{train}}(\theta),
-\]
-
-the classical upweighting influence of region \(v\) on the reference loss has the form
+Let
 
 \[
-\mathcal I_v
-=
--
-g_{\mathrm{ref}}^\top
-H_\theta^{-1}
-g_v.
+d_{\mathrm{ref}}(v)
 \]
 
-With the sign convention that positive \(p_v\) should mean "helpful", define
+be the fraction of reference states assigned to region \(v\). Then
+
+\[
+p_v^{\mathrm{occ}}
+=
+\frac{
+d_{\mathrm{ref}}(v)+\epsilon
+}{
+\sum_u d_{\mathrm{ref}}(u)+K\epsilon
+}.
+\]
+
+Because pilot evidence may favor occupancy over gradient alignment, occupancy remains a first-class estimator.
+
+---
+
+# 15. Hybrid relevance
+
+Combine occupancy and gradient relevance:
+
+\[
+\boxed{
+\tilde p_v
+=
+(p_v^{\mathrm{occ}}+\epsilon)^\eta
+(p_v^{\mathrm{grad}}+\epsilon)^{1-\eta}
+}
+\]
+
+with \(\eta\in[0,1]\), then normalize over regions.
+
+Ablate
+
+\[
+\eta\in\{0,0.5,1\}.
+\]
+
+---
+
+# 16. Influence-function option
+
+A second-order variant is
 
 \[
 u_v^{\mathrm{IF}}
 =
 g_{\mathrm{ref}}^\top
-(H_\theta+\lambda I)^{-1}
+(H+\lambda I)^{-1}
 g_v.
 \]
 
-Because policy-gradient Hessians are non-convex and can be indefinite, a more stable RL approximation is to replace \(H\) with a Fisher / Gauss-Newton matrix:
+For PPO, use a diagonal empirical Fisher approximation:
 
 \[
 u_v^{\mathrm{Fisher}}
 =
 g_{\mathrm{ref}}^\top
-(F_\theta+\lambda I)^{-1}
-g_v.
+\frac{
+g_v
+}{
+\operatorname{diag}(F)+\lambda
+}.
 \]
 
-Implementation options:
-
-1. **FO cosine alignment** — main MVP.
-2. **FO dot product** — ablation.
-3. **Diagonal empirical Fisher** — recommended second estimator.
-4. **Conjugate-gradient inverse-Fisher-vector product** — stronger but slower.
-5. **LiSSA / IHVP** — only if time permits.
-
-For ICRA, the safest story is:
-
-> HERP uses first-order performance alignment in the main algorithm and evaluates second-order/Fisher influence as an estimator ablation.
+Full IHVP is not required for ICRA.
 
 ---
 
-## 12. Additional \(p_v\) options
+# 17. Why \(n_v\propto p_v\sigma_v\)
 
-### 12.1 Occupancy relevance
-
-If \(d_{\mathrm{ref}}(v)\) is the frequency with which region \(v\) appears under normal reference rollouts,
+Suppose each region produces stochastic policy-gradient samples \(G_v(\tau)\) with mean
 
 \[
-p_v^{\mathrm{occ}}
+\mu_v
 =
-\frac{d_{\mathrm{ref}}(v)}
-{\sum_u d_{\mathrm{ref}}(u)}.
+\mathbb E[G_v(\tau)\mid v].
 \]
 
-This recovers the original intuition that states frequently encountered at evaluation matter more.
-
-### 12.2 Hybrid occupancy + gradient relevance
-
-\[
-\tilde p_v
-=
-(d_{\mathrm{ref}}(v)+\epsilon)^\eta
-([c_v]_+ + \epsilon)^{1-\eta}.
-\]
-
-This is useful if pure gradient alignment is noisy.
-
-### 12.3 Actual short-horizon improvement oracle
-
-For analysis only, update a copied policy on region \(v\) for one tiny optimization step and measure
-
-\[
-\Delta J_{\mathrm{ref},v}
-=
-J_{\mathrm{ref}}(\theta_v^+)-J_{\mathrm{ref}}(\theta).
-\]
-
-This is too expensive for the main algorithm but is an excellent ground-truth diagnostic for \(p_v\).
-
----
-
-# Part IV. Why \(n_v \propto p_v\sigma_v\)
-
-## 13. Stratified gradient-estimation view
-
-Let each region produce a stochastic gradient contribution
-
-\[
-G_v(\tau),
-\qquad
-\mu_v=\mathbb E[G_v(\tau)\mid v].
-\]
-
-Assume a performance-relevant target gradient has the form
+Assume the target performance-relevant gradient has form
 
 \[
 g^\star
 =
-\sum_v p_v \mu_v.
+\sum_v p_v\mu_v.
 \]
 
-With \(n_v\) independent rollouts from region \(v\),
+Using \(n_v\) independent rollouts from region \(v\),
 
 \[
 \hat g
@@ -646,76 +644,67 @@ Let
 \operatorname{Cov}[G_v(\tau)\mid v].
 \]
 
-Then
+Ignoring cross-region covariance,
 
 \[
 \mathbb E\|\hat g-g^\star\|_2^2
 =
 \sum_v
-\frac{p_v^2\sigma_{g,v}^2}{n_v},
+\frac{
+p_v^2\sigma_{g,v}^2
+}{
+n_v
+}.
 \]
 
-ignoring cross-region covariance.
-
-The budget-allocation problem is
+Solve
 
 \[
-\min_{n_v>0}
+\min_{\{n_v\}}
 \sum_v
-\frac{p_v^2\sigma_{g,v}^2}{n_v}
-\quad
-\text{s.t.}
-\quad
+\frac{
+p_v^2\sigma_{g,v}^2
+}{
+n_v
+}
+\]
+
+subject to
+
+\[
 \sum_v n_v=B.
 \]
 
-The Lagrangian is
+The stationary solution is
 
 \[
-\mathcal L
-=
-\sum_v
-\frac{p_v^2\sigma_{g,v}^2}{n_v}
-+
-\lambda
-\left(
-\sum_vn_v-B
-\right).
-\]
-
-Stationarity gives
-
-\[
--\frac{p_v^2\sigma_{g,v}^2}{n_v^2}
-+\lambda
-=0,
-\]
-
-hence
-
-\[
+\boxed{
 n_v^\star
 =
 B
-\frac{p_v\sigma_{g,v}}
-{\sum_u p_u\sigma_{g,u}}.
+\frac{
+p_v\sigma_{g,v}
+}{
+\sum_u p_u\sigma_{g,u}
+}
+}.
 \]
 
-This is the classical Neyman allocation structure.
+This is the Neyman-allocation structure.
 
 ---
 
-## 14. Connecting trajectory branching to gradient variance
+# 18. Connecting future branching to gradient variance
 
-HERP does not want to compute full gradient variance for every region. It uses future-trajectory dispersion as a proxy.
-
-Assume the per-trajectory gradient signature can be written as
+Assume
 
 \[
-G_v(\tau)=h_\theta(Z_v)
+G_v(\tau)=h_\theta(Z_v),
+\qquad
+Z_v=\Psi(\tau^+),
 \]
 
-for a future-trajectory representation \(Z_v=\Psi(\tau^+)\), and that \(h_\theta\) is locally \(L_g\)-Lipschitz:
+and local Lipschitzness:
 
 \[
 \|h_\theta(z)-h_\theta(z')\|_2
@@ -727,13 +716,11 @@ Then
 
 \[
 \frac12
-\mathbb E
-\|G-G'\|_2^2
+\mathbb E\|G-G'\|_2^2
 \le
 L_g^2
 \frac12
-\mathbb E
-\|Z-Z'\|_2^2.
+\mathbb E\|Z-Z'\|_2^2.
 \]
 
 Since
@@ -748,23 +735,18 @@ Since
 we obtain
 
 \[
-\sigma_{g,v}^2
+\boxed{
+\sigma_{g,v}
 \le
-L_g^2
-\sigma_{\text{traj},v}^2.
+L_g\sigma_{\mathrm{traj},v}
+}.
 \]
 
-Thus trajectory dispersion can serve as an upper-bound proxy for gradient uncertainty under a local Lipschitz assumption.
-
-This is the cleanest bridge between the desired "branching future trajectories" story and the allocation theory.
+Thus future-trajectory branching is a proxy for regional gradient uncertainty.
 
 ---
 
-# Part V. Practical allocator
-
-## 15. Robust finite-budget score
-
-Directly using \(p_v\sigma_v\) can starve regions because both estimates are noisy early in training.
+# 19. Practical priority
 
 Use
 
@@ -772,230 +754,207 @@ Use
 q_v
 =
 \frac{
-(\tilde p_v+\epsilon_p)^{\alpha}
-(\tilde\sigma_v+\epsilon_\sigma)^{\beta}
+(p_v+\epsilon_p)^\alpha
+(\sigma_v+\epsilon_\sigma)^\beta
 }{
 \sum_u
-(\tilde p_u+\epsilon_p)^{\alpha}
-(\tilde\sigma_u+\epsilon_\sigma)^{\beta}
+(p_u+\epsilon_p)^\alpha
+(\sigma_u+\epsilon_\sigma)^\beta
 }.
 \]
 
-Then
-
-\[
-n_v
-=
-n_{\min}
-+
-\operatorname{AllocateMultinomial}
-(B-Kn_{\min},q).
-\]
-
-Default:
-
-\[
-\alpha=1,\qquad
-\beta=1,\qquad
-n_{\min}=0
-\]
-
-with an \(\epsilon\)-floor or 5--10% uniform exploration mass.
-
-A useful staleness term is
+Add uniform mixing
 
 \[
 q_v
 \leftarrow
 (1-\rho)q_v
 +
-\rho
-\frac{a_v}{\sum_u a_u},
+\frac{\rho}{K}.
 \]
 
-where \(a_v\) increases with time since region \(v\) was last probed. This mirrors the anti-starvation principle in Prioritized Level Replay.
+Optionally add staleness.
+
+Recommended defaults:
+
+\[
+\alpha=\beta=1,
+\qquad
+\rho=0.1.
+\]
 
 ---
 
-# Part VI. Full HERP algorithm
+# 20. HERP algorithm
 
-## 16. Outer-loop algorithm
+At each training round:
 
-At each allocation round:
-
-1. Collect ordinary current-policy trajectories from the original initial-state distribution.
-2. Add encountered simulator states to the region archive.
-3. Build / update \(\mathcal D_{\mathrm{ref}}\) from ordinary target-distribution rollouts.
-4. Compute the reference gradient signature \(g_{\mathrm{ref}}\).
-5. For candidate regions:
-   - restore archived state;
-   - run \(K\) short probe futures;
-   - estimate \(\sigma_v\);
-   - compute region policy-gradient signature \(g_v\);
+1. Collect ordinary PPO rollouts.
+2. Add visited states to the archive.
+3. Periodically collect a reference batch.
+4. Select candidate regions.
+5. For each candidate:
+   - restore an archived state,
+   - collect short future probes,
+   - estimate \(\sigma_v\),
+   - collect a signature batch,
    - estimate \(p_v\).
-6. Compute
-   \[
-   q_v\propto p_v\sigma_v.
-   \]
-7. Allocate the extra interaction budget across regions.
-8. Restore sampled archive states and collect on-policy rollout fragments.
-9. Train PPO on ordinary + allocated fragments.
-10. Repeat with the updated policy.
+6. Compute \(q_v\propto p_v\sigma_v\).
+7. Spend remaining interaction budget on restored-state rollouts sampled from \(q_v\).
+8. Train PPO on ordinary + allocated rollouts.
+9. Repeat.
 
-The ordinary rollouts are never removed. HERP reallocates an **additional or fixed split of the same total interaction budget**, so all methods must be compared under identical environment-step budgets.
+Reference rollouts are excluded from PPO optimization. Probe rollouts are counted in the interaction budget.
 
 ---
 
-# Part VII. Paper-facing theoretical claims
+# 21. ICRA benchmark scope
 
-## 17. Claims that are currently defensible
+Use three benchmark groups.
 
-### Proposition A — Optimal stratified allocation
+## ManiSkill
 
-Under independent per-region gradient sampling and fixed \(p_v\), the allocation minimizing the trace variance of the weighted gradient estimator is
+- PushCube-v1
+- PickCube-v1
+- StackCube-v1
+- PegInsertionSide-v1
+
+## Meta-World
+
+- button-press-v3
+- drawer-open-v3
+- pick-place-v3
+- peg-insert-side-v3
+
+## Gymnasium Robotics / Fetch
+
+- FetchPush-v4
+- FetchPickAndPlace-v4
+
+This gives 10 tasks across two simulator families and multiple manipulation settings without overengineering the codebase.
+
+---
+
+# 22. Main baselines
+
+Main table:
+
+1. PPO
+2. RND
+3. Disagreement
+4. HERP-\(\sigma\)
+5. HERP-\(p\)
+6. HERP
+
+Optional if time allows:
+
+7. Go-Explore-style region sampling
+8. PLR-style region replay
+
+All methods use the same PPO backbone and equal environment-step budget.
+
+---
+
+# 23. Mechanism validation
+
+## 23.1 \(\sigma_v\)
+
+Compare cheap \(K=4\) estimates to independent \(K=64\) estimates over archived regions and report Spearman correlation.
+
+Optionally test
 
 \[
-n_v^\star\propto p_v\sigma_{g,v}.
-\]
-
-This can be formally proved exactly.
-
-### Proposition B — First-order performance relevance
-
-For sufficiently small \(\eta\),
-
-\[
-L_{\mathrm{ref}}(\theta-\eta g_v)
-=
-L_{\mathrm{ref}}(\theta)
--
-\eta g_{\mathrm{ref}}^\top g_v
-+
-O(\eta^2).
-\]
-
-Thus gradient alignment is a local first-order proxy for improvement of the reference objective.
-
-This can be formally proved by Taylor expansion.
-
-### Proposition C — Trajectory dispersion controls gradient dispersion
-
-Under the local Lipschitz assumption above,
-
-\[
+\rho(
+\sigma_{\mathrm{traj},v},
 \sigma_{g,v}
-\le
-L_g\sigma_{\text{traj},v}.
+).
 \]
 
-This justifies using future-trajectory branching as a computational proxy.
+## 23.2 \(p_v\)
 
-### Proposition D — Transition disagreement can be mapped to value uncertainty
+Use a controlled PPO-delta experiment. For each region \(v\):
 
-If \(\hat\epsilon_{T,v}\) is a valid bound on local transition-model mismatch, the Lobel-Parr tight Simulation-Lemma expression yields a monotone bound-shaped value-sensitivity score.
+1. clone the checkpoint twice,
+2. update copy A with a matched base PPO batch,
+3. update copy B with base + region data,
+4. evaluate both on identical reference seeds.
 
-Do not claim that raw trajectory Euclidean distance is itself \(\epsilon_T\).
-
----
-
-# Part VIII. What the experiments must validate
-
-## 18. Mechanism validation
-
-The paper must separately demonstrate that both learned quantities mean what the method claims.
-
-### \(\sigma_v\) validation
-
-For a sampled set of archived states:
-
-1. estimate \(\hat\sigma_v\) using only \(K\in\{2,4,8\}\) probe rollouts;
-2. obtain an expensive oracle using 64--128 futures;
-3. measure Spearman correlation between estimated and oracle branching;
-4. visualize top and bottom branching states.
-
-Additional test:
-
-- compare future-trajectory dispersion with policy-gradient variance;
-- report correlation
-  \[
-  \rho(\sigma_{\text{traj},v},\sigma_{g,v}).
-  \]
-
-### \(p_v\) validation
-
-For sampled regions:
-
-1. compute FO alignment, Fisher alignment, occupancy relevance;
-2. on a copied policy, make one small update using data from region \(v\);
-3. measure actual reference-performance change \(\Delta J_{\mathrm{ref},v}\);
-4. report Spearman correlation between predicted \(p_v\) and actual improvement.
-
-This experiment is essential because it demonstrates that "performance-aware" is not just terminology.
-
----
-
-## 19. Essential ablations
-
-At minimum:
+Define
 
 \[
-\text{Uniform},\quad
-\sigma\text{-only},\quad
-p\text{-only},\quad
-p\times\sigma.
+\Delta_v
+=
+J_{\mathrm{ref}}(\theta_{B})
+-
+J_{\mathrm{ref}}(\theta_{A}).
 \]
 
-Estimator ablations:
-
-- trajectory pairwise \(\sigma\);
-- branch/decomposition \(\sigma\);
-- ensemble disagreement \(\sigma\);
-- gradient variance oracle \(\sigma\);
-- occupancy \(p\);
-- FO cosine \(p\);
-- FO dot-product \(p\);
-- diagonal-Fisher \(p\).
-
-Only a subset must appear in the main paper; the rest can be used to decide the final method.
+Report Spearman correlation between \(\Delta_v\) and occupancy, cosine, dot, Fisher, and hybrid relevance.
 
 ---
 
-# Part IX. Relationship to baselines
+# 24. Required ablations
 
-## 20. Conceptual comparison
+Core factorization:
 
-### RND / ICM
+\[
+\text{PPO}
+\quad
+\text{vs}
+\quad
+\text{HERP-}\sigma
+\quad
+\text{vs}
+\quad
+\text{HERP-}p
+\quad
+\text{vs}
+\quad
+\text{HERP}.
+\]
 
-They prioritize novelty or prediction error. They do not explicitly ask whether the resulting gradient helps the target performance objective.
+Estimator ablations only on representative tasks.
 
-### Exploration by disagreement
+\(\sigma_v\):
 
-Very close to the \(\sigma_v\) axis: model disagreement estimates uncertainty in dynamics. HERP differs by:
-- using multi-step future branching;
-- optionally separating controllable branching from environment noise;
-- multiplying exploration need by performance relevance.
+- pairwise future dispersion,
+- branch decomposition,
+- return variance,
+- disagreement.
 
-### Go-Explore
+\(p_v\):
 
-Very close operationally because it stores promising states and later returns to them before exploring. HERP differs in the criterion for which stored states deserve additional rollouts: a performance-aware \(p_v\sigma_v\) allocation rather than archive heuristics.
+- occupancy,
+- cosine,
+- dot,
+- diagonal Fisher,
+- hybrid.
 
-### Prioritized Level Replay
+Hyperparameter ablations only on one or two tasks:
 
-PLR prioritizes revisiting training levels based on estimated learning potential and staleness. HERP moves the sampling unit from environment level to **state region inside trajectory space**, and decomposes priority into branching need and performance relevance.
-
-### Gradient-aligned / influence-based online selection
-
-GradAlign and InfOES show that reference-gradient alignment / influence can guide online RL data selection in LLM RL. HERP transfers the optimization principle to robot trajectory-space exploration and combines it with dynamics-dependent branching.
+- \(H\in\{4,8,16\}\),
+- \(K\in\{2,4,8\}\),
+- allocated fraction \(\in\{0.1,0.25,0.5\}\).
 
 ---
 
-# Part X. References
+# 25. Claims not to make
 
-- Lobel, S. and Parr, R. **An Optimal Tightness Bound for the Simulation Lemma.** RLC 2024. https://arxiv.org/abs/2406.16249
-- Pathak, D. et al. **Curiosity-driven Exploration by Self-supervised Prediction.** ICML 2017. https://proceedings.mlr.press/v70/pathak17a.html
-- Burda, Y. et al. **Exploration by Random Network Distillation.** ICLR 2019. https://arxiv.org/abs/1810.12894
-- Pathak, D., Gandhi, D., Gupta, A. **Self-Supervised Exploration via Disagreement.** ICML 2019. https://proceedings.mlr.press/v97/pathak19a.html
-- Ecoffet, A. et al. **First return, then explore.** Nature 2021. https://www.nature.com/articles/s41586-020-03157-9
-- Jiang, M., Grefenstette, E., Rocktäschel, T. **Prioritized Level Replay.** ICLR 2021. https://arxiv.org/abs/2010.03934
-- Yang, N. et al. **GradAlign: Gradient-Aligned Data Selection for LLM Reinforcement Learning.** 2026. https://arxiv.org/abs/2602.21492
-- Gong, Y. et al. **Influence-based Online Experience Selection for Effective RLHF.** ACL 2026. https://aclanthology.org/2026.acl-long.2206/
+Do not claim:
+
+- raw trajectory distance equals transition-kernel TV distance,
+- gradient alignment is a full influence function,
+- the 32k-step pilot establishes final method ranking,
+- probes are free,
+- HERP is universally optimal.
+
+---
+
+# 26. References
+
+- Lobel, S. and Parr, R. An Optimal Tightness Bound for the Simulation Lemma. RLC 2024.
+- Pathak, D. et al. Curiosity-driven Exploration by Self-supervised Prediction. ICML 2017.
+- Burda, Y. et al. Exploration by Random Network Distillation. ICLR 2019.
+- Pathak, D., Gandhi, D., Gupta, A. Self-Supervised Exploration via Disagreement. ICML 2019.
+- Ecoffet, A. et al. First return, then explore. Nature 2021.
+- Jiang, M., Grefenstette, E., Rocktäschel, T. Prioritized Level Replay. ICLR 2021.
