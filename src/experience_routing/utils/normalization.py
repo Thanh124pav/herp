@@ -39,6 +39,21 @@ class RunningNormalizer:
             return np.ones(self.dim, dtype=np.float64)
         return np.sqrt(self._m2 / (self.count - 1)) + self.eps
 
+    def update_batch(self, x: np.ndarray) -> None:
+        """Vectorized Chan-style parallel update for a batch ``x`` [N, dim]."""
+        x = np.atleast_2d(np.asarray(x, dtype=np.float64))
+        n_b = x.shape[0]
+        if n_b == 0:
+            return
+        mean_b = x.mean(axis=0)
+        m2_b = ((x - mean_b) ** 2).sum(axis=0)
+        n_a = self.count
+        n = n_a + n_b
+        delta = mean_b - self._mean
+        self._mean += delta * (n_b / n)
+        self._m2 += m2_b + delta**2 * (n_a * n_b / n)
+        self.count = n
+
     def normalize(self, x: np.ndarray) -> np.ndarray:
         return (np.asarray(x, dtype=np.float64) - self.mean) / self.std
 
@@ -50,3 +65,10 @@ class RunningNormalizer:
             "mean": self._mean.copy(),
             "m2": self._m2.copy(),
         }
+
+    def load_state_dict(self, sd: dict) -> None:
+        self.dim = int(sd["dim"])
+        self.eps = float(sd["eps"])
+        self.count = int(sd["count"])
+        self._mean = np.asarray(sd["mean"], dtype=np.float64).copy()
+        self._m2 = np.asarray(sd["m2"], dtype=np.float64).copy()

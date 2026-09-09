@@ -45,7 +45,8 @@ class GaussianActor(nn.Module):
 
     @torch.no_grad()
     def act(self, obs_np: np.ndarray, deterministic: bool = False) -> np.ndarray:
-        obs = torch.as_tensor(obs_np, dtype=torch.float32).unsqueeze(0)
+        device = next(self.parameters()).device
+        obs = torch.as_tensor(obs_np, dtype=torch.float32, device=device).unsqueeze(0)
         mu, log_std = self.forward(obs)
         if deterministic:
             action = torch.tanh(mu)
