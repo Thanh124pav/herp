@@ -54,12 +54,18 @@ def _restore_precision(adapter, tol: float):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="ManiSkill GPU sim requires CUDA")
-def test_maniskill_snapshot_restore_precision():
+@pytest.mark.parametrize("env_id", [
+    "PickCube-v1",
+    "LiftPegUpright-v1",
+    "PlaceSphere-v1",
+    "PokeCube-v1",
+])
+def test_maniskill_snapshot_restore_precision(env_id):
     from herp.envs.maniskill import ManiSkillAdapter
 
     try:
         adapter = ManiSkillAdapter(
-            "PickCube-v1", sim_backend="physx_cuda", device="cuda"
+            env_id, sim_backend="physx_cuda", device="cuda"
         ).make(num_envs=4, seed=0)
     except Exception as exc:  # pragma: no cover - environment guard
         pytest.skip(f"ManiSkill unavailable: {exc}")

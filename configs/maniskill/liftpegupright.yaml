@@ -1,0 +1,7 @@
+benchmark: maniskill
+env_id: LiftPegUpright-v1
+control_mode: pd_joint_delta_pos
+obs_mode: state
+reward_mode: normalized_dense
+sim_backend: physx_cuda
+render_backend: gpu

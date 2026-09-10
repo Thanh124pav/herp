@@ -34,7 +34,12 @@ import time
 
 
 ML_TASKS = {
-    "maniskill": ["PushCube-v1", "PickCube-v1", "StackCube-v1", "PegInsertionSide-v1"],
+    # Ordered easy -> hard. The middle three (LiftPegUpright/PlaceSphere/PokeCube)
+    # are medium-difficulty tabletop tasks that fill the gap between the easy
+    # cubes and PegInsertionSide, so methods can differentiate before saturation.
+    "maniskill": ["PushCube-v1", "PickCube-v1",
+                  "LiftPegUpright-v1", "PlaceSphere-v1", "PokeCube-v1",
+                  "StackCube-v1", "PegInsertionSide-v1"],
     "metaworld": ["button-press-v3", "drawer-open-v3", "pick-place-v3", "peg-insert-side-v3"],
     "fetch": ["FetchPush-v4", "FetchPickAndPlace-v4"],
 }
@@ -46,6 +51,10 @@ DEFAULT_STEPS_PER_BENCHMARK = {
     "fetch": 1_000_000,
 }
 DEFAULT_STEPS_PER_TASK = {
+    # Harder-than-cube tasks get more than the 5M maniskill default. This is a
+    # starting guess; use scripts/run_peg_staged.py to probe the real budget
+    # (5M -> 10M -> ...) for any task that plateaus low.
+    "PokeCube-v1": 10_000_000,
     "PegInsertionSide-v1": 75_000_000,
 }
 
