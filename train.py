@@ -65,16 +65,16 @@ class Args:
     total_timesteps: int = 5_000_000
     num_envs: int = 1024
     num_envs_ref: int = 64
-    num_steps: int = 8
+    num_steps: int = 32
     reference_horizon: int = 16
     reference_interval: int = 4
     # --- ppo ---
     learning_rate: float = 3e-4
-    anneal_lr: bool = True
+    anneal_lr: bool = False
     gamma: float = 0.8
     gae_lambda: float = 0.9
     num_minibatches: int = 32
-    update_epochs: int = 4
+    update_epochs: int = 8
     clip_coef: float = 0.2
     clip_vloss: bool = False
     ent_coef: float = 0.0
@@ -116,7 +116,7 @@ class Args:
     # --- sim / device ---
     control_mode: str = "pd_joint_delta_pos"
     obs_mode: str = "state"
-    reward_mode: str = "dense"
+    reward_mode: str = "normalized_dense"
     sim_backend: str = "physx_cuda"
     render_backend: str = "gpu"
     device: str = "cuda"
@@ -242,20 +242,31 @@ def ppo_update(agent, optimizer, rollout, args):
     batch_size = b_obs.shape[0]
     minibatch = max(1, batch_size // args.num_minibatches)
 
-    inds = torch.randperm(batch_size, device=b_obs.device)
+    # Use numpy for minibatch shuffling — matches the upstream ManiSkill PPO
+    # recipe verified via mini_train_direct2.py. Prior attempt using GPU
+    # torch.randperm gave a training curve that consistently diverged from
+    # the upstream baseline (return climbs then collapses).
+    b_inds = np.arange(batch_size)
     metrics = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "approx_kl": 0.0, "clipfrac": 0.0}
     stop = False
     steps = 0
     for epoch in range(args.update_epochs):
-        inds = inds[torch.randperm(batch_size, device=b_obs.device)]
+        np.random.shuffle(b_inds)
         for start in range(0, batch_size, minibatch):
-            mb = inds[start : start + minibatch]
+            mb = b_inds[start : start + minibatch]
             _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb], b_actions[mb])
             logratio = newlogprob - b_logprobs[mb]
             ratio = logratio.exp()
             with torch.no_grad():
                 approx_kl = ((ratio - 1) - logratio).mean()
                 clipfrac = ((ratio - 1.0).abs() > args.clip_coef).float().mean()
+            # Match upstream: bail BEFORE the update when the current policy is
+            # already too far from the sampling policy on this minibatch. The
+            # pre-refactor code did the update first and then broke, which
+            # allowed one final blow-out update per iteration.
+            if args.target_kl and approx_kl > args.target_kl:
+                stop = True
+                break
             mb_adv = b_advantages[mb]
             if args.norm_adv and mb_adv.numel() > 1:
                 mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
@@ -280,9 +291,6 @@ def ppo_update(agent, optimizer, rollout, args):
             metrics["approx_kl"] += float(approx_kl.detach())
             metrics["clipfrac"] += float(clipfrac.detach())
             steps += 1
-            if args.target_kl and approx_kl > args.target_kl:
-                stop = True
-                break
         if stop:
             break
     for k in metrics:
@@ -297,29 +305,44 @@ def ppo_update(agent, optimizer, rollout, args):
 
 @torch.no_grad()
 def evaluate(adapter, agent, args, device, episodes: int) -> dict:
-    obs, _ = adapter.reset(seed=args.seed + 1_000_000)
-    returns = torch.zeros(adapter.num_envs, device=device)
-    successes = torch.zeros(adapter.num_envs, device=device)
-    finished = torch.zeros(adapter.num_envs, dtype=torch.bool, device=device)
+    """Match the upstream ManiSkill PPO eval:
+
+    - reset the vec env WITHOUT a fixed seed so tasks are freshly randomized
+      (mixing this with a big vec fanout gives an unbiased success estimate);
+    - roll ``adapter.max_episode_steps`` steps windows until we have at least
+      ``episodes`` completed episodes across all slots, tracking ``success_once``;
+    - success is per-episode ``max`` of the per-step ``info["success"]`` flag.
+
+    The previous implementation seeded reset to a single fixed task setup and
+    then bailed as soon as each slot finished ONE episode — so it evaluated a
+    trained policy against exactly ``num_eval_envs`` runs of ONE particular
+    task, which made success stay 0 even when training was working.
+    """
+    obs, _ = adapter.reset()
     ep_returns: list[float] = []
     ep_successes: list[float] = []
+    per_slot_return = torch.zeros(adapter.num_envs, device=device)
+    per_slot_success = torch.zeros(adapter.num_envs, device=device)
     steps = 0
-    max_steps = min(20_000, max(adapter.max_episode_steps * 4, 200))
+    max_steps = max(50, adapter.max_episode_steps) * 8
     while len(ep_returns) < episodes and steps < max_steps:
         action = agent.act(obs.to(device), deterministic=True)
         action = action.clamp(adapter.action_low(), adapter.action_high())
         obs, reward, term, trunc, info = adapter.step(action)
         reward = reward.to(device).float()
-        returns = returns + reward * (~finished).float()
-        successes = torch.maximum(successes, adapter.success_from_info(info).float().to(device))
-        done = (term.to(device) | trunc.to(device)) & ~finished
-        for i in torch.where(done)[0].tolist():
-            ep_returns.append(float(returns[i].item()))
-            ep_successes.append(float(successes[i].item()))
-            finished[i] = True
+        per_slot_return = per_slot_return + reward
+        per_slot_success = torch.maximum(
+            per_slot_success, adapter.success_from_info(info).float().to(device)
+        )
+        done = (term.to(device) | trunc.to(device))
+        if done.any():
+            done_ids = torch.where(done)[0].tolist()
+            for i in done_ids:
+                ep_returns.append(float(per_slot_return[i].item()))
+                ep_successes.append(float(per_slot_success[i].item()))
+                per_slot_return[i] = 0.0
+                per_slot_success[i] = 0.0
         steps += 1
-        if finished.all():
-            break
     return dict(
         eval_return=float(np.mean(ep_returns)) if ep_returns else 0.0,
         eval_success=float(np.mean(ep_successes)) if ep_successes else 0.0,
@@ -393,7 +416,7 @@ def write_provenance(out_dir: Path, args: Args) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_adapter(args: Args, num_envs: int):
+def _build_adapter(args: Args, num_envs: int, role: str = "train"):
     kwargs = dict(env_id=args.env_id, obs_mode=args.obs_mode, reward_mode=args.reward_mode)
     if args.benchmark == "maniskill":
         kwargs.update(
@@ -402,6 +425,17 @@ def _build_adapter(args: Args, num_envs: int):
             render_backend=args.render_backend,
             device=args.device,
         )
+        # Eval env re-randomises every episode (upstream ManiSkill recipe);
+        # training env keeps the sampled task fixed after reset. This is the
+        # difference that made train.py's eval report success=0 even when
+        # training was solving PushCube — the eval env kept re-running the
+        # same fixed configuration.
+        kwargs["reconfiguration_freq"] = 1 if role == "eval" else None
+        # ManiSkill asserts reconfiguration_freq>0 requires ignore_terminations=True
+        # (partial-reset envs can't be silently reconfigured). Match upstream:
+        # training runs with partial_reset=True (ignore_terminations=False),
+        # eval runs with partial_reset=False (ignore_terminations=True).
+        kwargs["ignore_terminations"] = (role == "eval")
     else:
         kwargs.update(device=args.device if args.device == "cpu" else "cpu")
     adapter = make_adapter(args.benchmark, **kwargs)
@@ -411,12 +445,21 @@ def _build_adapter(args: Args, num_envs: int):
 
 def main():
     args = parse_args()
+    # Seed EVERYTHING before touching CUDA — the outer determinism block below
+    # must match the recipe verified in mini_train_direct2.py (upstream env +
+    # my Agent + HERP scaffolding → success=1.0 on PushCube-v1 by 491k steps).
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if args.torch_deterministic:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+    else:
+        # Throughput mode: let cuDNN autotune and use TF32 matmul on Ampere+.
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
     out_dir = Path(args.output_dir) / f"{args.env_id}_{args.method}_seed{args.seed}_{time.time_ns()}"
@@ -425,17 +468,20 @@ def main():
     logger = CsvLogger(out_dir / "metrics.csv")
     region_logger = CsvLogger(out_dir / "regions.csv")
 
+    # Env-creation order matters — creating an env consumes torch RNG (SAPIEN
+    # allocates GPU tensors), so we build ALL envs first and then Agent, so
+    # Agent's initial weights land at a well-defined RNG offset (matches the
+    # upstream ManiSkill PPO recipe verified via mini_train_direct.py).
     adapter = _build_adapter(args, args.num_envs)
     write_provenance(out_dir, args)
     obs_dim = adapter.obs_dim
     action_dim = adapter.action_dim
-    agent = Agent(obs_dim, action_dim, args.hidden).to(device)
-    optimizer = torch.optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
-
     ref_adapter = None
     if args.method in ("herp", "herp_p"):
-        ref_adapter = _build_adapter(args, args.num_envs_ref)
-    eval_adapter = _build_adapter(args, args.num_eval_envs)
+        ref_adapter = _build_adapter(args, args.num_envs_ref, role="ref")
+    eval_adapter = _build_adapter(args, args.num_eval_envs, role="eval")
+    agent = Agent(obs_dim, action_dim, args.hidden).to(device)
+    optimizer = torch.optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     archive = RegionArchive(args.max_snapshots_per_region, args.seed)
     regionizer = OnlineRegionizer(
@@ -491,6 +537,9 @@ def main():
         rew_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
         val_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
         done_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
+        # Per-step V(final_obs) for slots that ended at that step. Zero
+        # elsewhere; see compute_gae for the truncation-bootstrap contract.
+        final_values_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
         mode_buf = torch.zeros(args.num_steps, args.num_envs, dtype=torch.long, device=device)
 
         # Probe assignment (fixed for this rollout window)
@@ -523,28 +572,42 @@ def main():
         step_modes[probe_slot_ids] = MODE_PROBE
         step_modes[alloc_slot_ids] = MODE_ALLOCATED
 
+        # Rollout — matches upstream ManiSkill ppo.py structure verbatim
+        # (verified end-to-end via mini_train_direct.py → success=1.0 on
+        # PushCube-v1 in 800k steps). Keep the HERP-specific accounting
+        # (counts, mode_buf) but do not rearrange this block.
+        action_low = adapter.action_low()
+        action_high = adapter.action_high()
         for step in range(args.num_steps):
             obs_buf[step] = obs
             done_buf[step] = next_done.float()
             mode_buf[step] = step_modes
             with torch.no_grad():
                 action, logprob, _ent, value = agent.get_action_and_value(obs)
-                val_buf[step] = value.view(-1)
+                val_buf[step] = value.flatten()
             act_buf[step] = action
             logp_buf[step] = logprob
-            applied = action.clamp(adapter.action_low(), adapter.action_high())
-            next_obs, reward, term, trunc, info = adapter.step(applied)
-            reward = reward.to(device).float() * args.reward_scale
-            rew_buf[step] = reward
-            next_done = (term.to(device) | trunc.to(device))
+            clipped = action.detach().clamp(action_low, action_high)
+            next_obs, reward, term, trunc, info = adapter.step(clipped)
+            next_obs = next_obs.to(device)
+            next_done = torch.logical_or(term.to(device), trunc.to(device)).float()
+            rew_buf[step] = reward.to(device).view(-1) * args.reward_scale
+            # Truncation-bootstrap using upstream's `_final_info` mask + `final_observation` obs.
+            if isinstance(info, dict) and "final_info" in info:
+                done_mask = info.get("_final_info")
+                if done_mask is not None and done_mask.any():
+                    with torch.no_grad():
+                        fo = info["final_observation"]
+                        if not torch.is_tensor(fo):
+                            fo = torch.as_tensor(fo, device=device)
+                        fo = fo.to(device)
+                        idx = torch.arange(args.num_envs, device=device)[done_mask]
+                        final_values_buf[step, idx] = agent.get_value(fo[done_mask]).view(-1)
             counts["normal_steps"] += num_normal_slots
             counts["probe_steps"] += num_probe_slots
             counts["allocated_steps"] += num_alloc_slots
-            # After the first probe step slots continue as NORMAL for the rest of
-            # the rollout window (they've been restored; further transitions are
-            # ordinary policy training samples).
             step_modes = torch.full_like(step_modes, MODE_NORMAL)
-            obs = next_obs.to(device).float()
+            obs = next_obs
 
             # Archive new observations from NORMAL slots
             if use_archive and (step % args.archive_interval == 0):
@@ -646,11 +709,18 @@ def main():
 
         # ---------------- GAE + PPO update ----------------
         with torch.no_grad():
-            next_value = agent.get_value(obs).view(-1)
+            next_value = agent.get_value(obs).reshape(1, -1).view(-1)
         advantages, returns = compute_gae(
-            rew_buf, done_buf, val_buf, next_value, args.gamma, args.gae_lambda
+            rew_buf, done_buf, val_buf, next_value,
+            args.gamma, args.gae_lambda,
+            next_done=next_done,
+            final_values=final_values_buf,
         )
-        adv_scale_state.update(advantages.reshape(-1, 1).detach().cpu())
+        if needs_reference:
+            # RunningNormalizer.update loops in Python over every advantage —
+            # only needed for HERP reference/relevance; skip in pure-PPO/RND
+            # paths where its output is unused.
+            adv_scale_state.update(advantages.reshape(-1, 1).detach().cpu())
         rollout = dict(
             obs=obs_buf.reshape(-1, obs_dim),
             actions=act_buf.reshape(-1, action_dim),
