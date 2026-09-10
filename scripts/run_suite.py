@@ -83,6 +83,14 @@ def parse():
                    help="Override sim backend; default is per-benchmark (§4.16).")
     p.add_argument("--num-envs", type=int, default=None,
                    help="Override vector-env count; default is per-benchmark (§4.16).")
+    p.add_argument("--wandb-mode", choices=["disabled", "offline", "online"], default="disabled")
+    p.add_argument("--wandb-project", default="herp")
+    p.add_argument("--wandb-entity", default="")
+    p.add_argument("--wandb-group", default="",
+                   help="Group name; defaults to the suite output directory name.")
+    p.add_argument("--wandb-tags", default="")
+    p.add_argument("--wandb-log-every", type=int, default=1,
+                   help="Log every N policy updates (eval updates are always logged).")
     p.add_argument("--extra", nargs=argparse.REMAINDER, default=[],
                    help="Extra flags forwarded to train.py verbatim.")
     p.add_argument("--output-dir", default="outputs/herp_suite")
@@ -152,8 +160,17 @@ def main():
     root.mkdir(parents=True, exist_ok=True)
     protocol = {k: v for k, v in vars(opt).items() if k not in ("workers",)}
     protocol_path = root / "suite.json"
-    if protocol_path.exists() and json.loads(protocol_path.read_text()) != protocol:
-        raise ValueError(f"Protocol at {protocol_path} differs; use a new output directory.")
+    if protocol_path.exists():
+        existing_protocol = json.loads(protocol_path.read_text())
+        mismatches = {
+            key: (existing_protocol[key], protocol.get(key))
+            for key in existing_protocol
+            if key in protocol and existing_protocol[key] != protocol[key]
+        }
+        if mismatches:
+            raise ValueError(
+                f"Protocol at {protocol_path} differs for {mismatches}; use a new output directory."
+            )
     protocol_path.write_text(json.dumps(protocol, indent=2, default=str))
     env = dict(os.environ, OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
 
@@ -179,6 +196,17 @@ def main():
         num_envs = opt.num_envs or d.get("num_envs", 1)
         sim_backend = opt.sim_backend or d.get("sim_backend", "physx_cpu")
         steps = resolve_steps(opt, benchmark, task)
+        checkpoints = list(cell.glob("*/checkpoint_*.pt"))
+        resume_args = []
+        if checkpoints:
+            def checkpoint_step(path: Path) -> int:
+                try:
+                    return int(path.stem.rsplit("_", 1)[1])
+                except (IndexError, ValueError):
+                    return -1
+            latest_checkpoint = max(checkpoints, key=checkpoint_step)
+            if checkpoint_step(latest_checkpoint) >= 0:
+                resume_args = ["--resume-from", str(latest_checkpoint)]
         command = [
             sys.executable, "train.py",
             "--benchmark", benchmark, "--env-id", task, "--method", method, "--seed", str(seed),
@@ -188,10 +216,17 @@ def main():
             "--device", opt.device,
             "--sim-backend", sim_backend, "--num-envs", str(num_envs),
             "--output-dir", str(cell),
+            "--wandb-mode", opt.wandb_mode,
+            "--wandb-project", opt.wandb_project,
+            "--wandb-entity", opt.wandb_entity,
+            "--wandb-group", opt.wandb_group or root.name,
+            "--wandb-tags", opt.wandb_tags,
+            "--wandb-log-every", str(opt.wandb_log_every),
+            *resume_args,
             *opt.extra,
         ]
         started = time.time()
-        with (cell / "console.log").open("w") as log:
+        with (cell / "console.log").open("a") as log:
             result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, env=env)
         duration = time.time() - started
         plateau_kind, plateau_info = check_plateau(cell)

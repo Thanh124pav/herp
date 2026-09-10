@@ -92,6 +92,12 @@ python scripts/run_suite.py --benchmarks maniskill \
     --tasks PickCube-v1 PushCube-v1 --methods ppo rnd disagreement herp \
     --seeds 0 1 2 --steps 5_000_000 --eval-interval 250_000 --eval-episodes 100
 
+# Same suite with W&B. Use --wandb-mode offline when the server has no network.
+python scripts/run_suite.py --benchmarks maniskill --tasks PushCube-v1 \
+    --methods ppo rnd disagreement herp --seeds 0 --steps 5_000_000 \
+    --wandb-mode online --wandb-project herp --wandb-group pushcube-5m \
+    --wandb-tags maniskill,pushcube
+
 # Baseline probe — upstream ManiSkill PPO, no HERP hooks.
 MS_SIM_BACKEND=physx_cpu python scripts/ppo_official.py \
     --env_id=PickCube-v1 --seed=0 --num_envs=1 --num_eval_envs=1 \
@@ -99,6 +105,12 @@ MS_SIM_BACKEND=physx_cpu python scripts/ppo_official.py \
     --total_timesteps=50000 --eval_freq=1 \
     --no-capture_video --no-save_model --exp_name=probe
 ```
+
+W&B is opt-in and disabled by default. Metrics are grouped under `eval/`, `ppo/`,
+`rollout/`, `intrinsic/`, `budget/`, `herp/`, and `system/`. HERP region
+distributions are logged as histograms at evaluation checkpoints. Checkpoints store the
+W&B run ID, so `--resume-from checkpoint_*.pt` continues the same run. Each output
+directory also contains `wandb.json` with the run identity.
 
 Method names accepted by `train.py`:
 

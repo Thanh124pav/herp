@@ -122,6 +122,7 @@ class ManiSkillAdapter(EnvAdapter):
             control_mode=self.control_mode,
             render_mode=render_mode,
             sim_backend=self.sim_backend,
+            render_backend=self.render_backend,
             reconfiguration_freq=self.reconfiguration_freq,
         )
         if isinstance(env.action_space, gym.spaces.Dict):

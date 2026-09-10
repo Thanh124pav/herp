@@ -124,6 +124,14 @@ class Args:
     # --- io ---
     output_dir: str = "outputs/herp"
     save_model: bool = True
+    resume_from: str = ""
+    wandb_mode: str = "disabled"
+    wandb_project: str = "herp"
+    wandb_entity: str = ""
+    wandb_group: str = ""
+    wandb_run_name: str = ""
+    wandb_tags: str = ""
+    wandb_log_every: int = 1
 
 
 VALID_METHODS = ("ppo", "herp", "herp_sigma", "herp_p", "rnd", "disagreement", "go_explore", "plr")
@@ -162,6 +170,10 @@ def parse_args(argv=None):
         parser.error(f"Unknown p estimator {args.p_estimator!r}")
     if args.sigma_estimator not in VALID_SIGMA_ESTIMATORS:
         parser.error(f"Unknown sigma estimator {args.sigma_estimator!r}")
+    if args.wandb_mode not in ("disabled", "offline", "online"):
+        parser.error("wandb_mode must be one of: disabled, offline, online")
+    if args.wandb_log_every < 1:
+        parser.error("wandb_log_every must be >= 1")
     if not 0 <= args.allocated_frac + args.probe_frac < 1:
         parser.error("probe_frac + allocated_frac must be in [0, 1)")
     return args
@@ -247,9 +259,13 @@ def ppo_update(agent, optimizer, rollout, args):
     # torch.randperm gave a training curve that consistently diverged from
     # the upstream baseline (return climbs then collapses).
     b_inds = np.arange(batch_size)
-    metrics = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "approx_kl": 0.0, "clipfrac": 0.0}
+    metrics = {
+        "policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0,
+        "approx_kl": 0.0, "clipfrac": 0.0, "grad_norm": 0.0,
+    }
     stop = False
     steps = 0
+    epochs_completed = 0
     for epoch in range(args.update_epochs):
         np.random.shuffle(b_inds)
         for start in range(0, batch_size, minibatch):
@@ -283,18 +299,25 @@ def ppo_update(agent, optimizer, rollout, args):
             loss = pg_loss - args.ent_coef * entropy.mean() + args.vf_coef * v_loss
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+            grad_norm = nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
             optimizer.step()
             metrics["policy_loss"] += float(pg_loss.detach())
             metrics["value_loss"] += float(v_loss.detach())
             metrics["entropy"] += float(entropy.mean().detach())
             metrics["approx_kl"] += float(approx_kl.detach())
             metrics["clipfrac"] += float(clipfrac.detach())
+            metrics["grad_norm"] += float(grad_norm.detach())
             steps += 1
+        epochs_completed = epoch + 1
         if stop:
             break
     for k in metrics:
         metrics[k] /= max(1, steps)
+    metrics.update(
+        ppo_epochs=epochs_completed,
+        ppo_minibatches=steps,
+        ppo_early_stop=float(stop),
+    )
     return metrics
 
 
@@ -324,7 +347,8 @@ def evaluate(adapter, agent, args, device, episodes: int) -> dict:
     per_slot_return = torch.zeros(adapter.num_envs, device=device)
     per_slot_success = torch.zeros(adapter.num_envs, device=device)
     steps = 0
-    max_steps = max(50, adapter.max_episode_steps) * 8
+    episode_windows = max(1, (episodes + adapter.num_envs - 1) // adapter.num_envs)
+    max_steps = max(50, adapter.max_episode_steps) * int(episode_windows)
     while len(ep_returns) < episodes and steps < max_steps:
         action = agent.act(obs.to(device), deterministic=True)
         action = action.clamp(adapter.action_low(), adapter.action_high())
@@ -343,6 +367,10 @@ def evaluate(adapter, agent, args, device, episodes: int) -> dict:
                 per_slot_return[i] = 0.0
                 per_slot_success[i] = 0.0
         steps += 1
+    # A vector step can finish more slots than requested; report exactly the
+    # configured episode count so methods with the same protocol stay comparable.
+    ep_returns = ep_returns[:episodes]
+    ep_successes = ep_successes[:episodes]
     return dict(
         eval_return=float(np.mean(ep_returns)) if ep_returns else 0.0,
         eval_success=float(np.mean(ep_successes)) if ep_successes else 0.0,
@@ -519,11 +547,96 @@ def main():
     update = 0
     start_time = time.monotonic()
 
+    checkpoint = None
+    if args.resume_from:
+        resume_path = Path(args.resume_from).expanduser().resolve()
+        checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+        saved_args = checkpoint.get("args", {})
+        for name in ("benchmark", "env_id", "method", "hidden", "control_mode", "obs_mode", "reward_mode"):
+            saved = saved_args.get(name, getattr(args, name))
+            if saved != getattr(args, name):
+                raise ValueError(f"Resume mismatch for {name}: checkpoint={saved!r}, current={getattr(args, name)!r}")
+        if "optimizer" not in checkpoint:
+            raise ValueError("Checkpoint predates resumable-state support; optimizer state is missing")
+        agent.load_state_dict(checkpoint["agent"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        if intrinsic is not None:
+            if checkpoint.get("intrinsic") is None or checkpoint.get("intrinsic_optimizer") is None:
+                raise ValueError("Checkpoint is missing intrinsic model/optimizer state")
+            intrinsic.load_state_dict(checkpoint["intrinsic"])
+            intrinsic_optimizer.load_state_dict(checkpoint["intrinsic_optimizer"])
+        global_steps = int(checkpoint["global_steps"])
+        cumulative = dict(checkpoint.get("cumulative", cumulative))
+        update = int(checkpoint.get("update", 0))
+        next_eval = int(checkpoint.get(
+            "next_eval", ((global_steps // args.eval_interval) + 1) * args.eval_interval
+        ))
+        if checkpoint.get("python_rng_state") is not None:
+            random.setstate(checkpoint["python_rng_state"])
+        if checkpoint.get("numpy_rng_state") is not None:
+            np.random.set_state(checkpoint["numpy_rng_state"])
+        if checkpoint.get("torch_rng_state") is not None:
+            torch.set_rng_state(checkpoint["torch_rng_state"].cpu())
+        if torch.cuda.is_available() and checkpoint.get("cuda_rng_state_all") is not None:
+            try:
+                torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state_all"])
+            except Exception:
+                pass
+        if checkpoint.get("generator_state") is not None:
+            generator.set_state(checkpoint["generator_state"].cpu())
+        (out_dir / "resume.json").write_text(json.dumps(dict(
+            resumed_from=str(resume_path), start_global_steps=global_steps,
+            target_total_timesteps=args.total_timesteps,
+        ), indent=2))
+
+    wandb_run = None
+    wandb_module = None
+    if args.wandb_mode != "disabled":
+        try:
+            import wandb as wandb_module
+        except ImportError as exc:
+            raise RuntimeError("W&B logging requested but wandb is not installed") from exc
+        resume_id = checkpoint.get("wandb_run_id") if checkpoint is not None else None
+        run_name = (
+            args.wandb_run_name
+            or f"{args.benchmark}-{args.env_id}-{args.method}-s{args.seed}"
+        )
+        tags = [tag.strip() for tag in args.wandb_tags.split(",") if tag.strip()]
+        wandb_run = wandb_module.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity or None,
+            group=args.wandb_group or None,
+            name=run_name,
+            tags=tags or None,
+            mode=args.wandb_mode,
+            dir=str(out_dir),
+            config=asdict(args),
+            id=resume_id,
+            resume="allow" if resume_id else None,
+        )
+        (out_dir / "wandb.json").write_text(
+            json.dumps(
+                {
+                    "id": wandb_run.id,
+                    "name": wandb_run.name,
+                    "project": args.wandb_project,
+                    "entity": args.wandb_entity or None,
+                    "group": args.wandb_group or None,
+                    "mode": args.wandb_mode,
+                    "url": getattr(wandb_run, "url", None),
+                },
+                indent=2,
+            )
+        )
+        wandb_run.define_metric("global_env_steps")
+        wandb_run.define_metric("*", step_metric="global_env_steps")
+
+    session_start_steps = global_steps
     max_updates = max(1, args.total_timesteps // (args.num_envs * args.num_steps))
 
     while global_steps < args.total_timesteps:
         if args.anneal_lr:
-            frac = 1.0 - update / max_updates
+            frac = max(0.0, 1.0 - global_steps / max(1, args.total_timesteps))
             optimizer.param_groups[0]["lr"] = frac * args.learning_rate
 
         # ---------------- rollout with per-slot modes ----------------
@@ -540,6 +653,11 @@ def main():
         # Per-step V(final_obs) for slots that ended at that step. Zero
         # elsewhere; see compute_gae for the truncation-bootstrap contract.
         final_values_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
+        next_obs_buf = torch.zeros(args.num_steps, args.num_envs, obs_dim, device=device)
+        extrinsic_reward_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
+        intrinsic_bonus_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
+        success_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
+        episode_end_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
         mode_buf = torch.zeros(args.num_steps, args.num_envs, dtype=torch.long, device=device)
 
         # Probe assignment (fixed for this rollout window)
@@ -591,7 +709,7 @@ def main():
             next_obs, reward, term, trunc, info = adapter.step(clipped)
             next_obs = next_obs.to(device)
             next_done = torch.logical_or(term.to(device), trunc.to(device)).float()
-            rew_buf[step] = reward.to(device).view(-1) * args.reward_scale
+            transition_next_obs = next_obs.clone()
             # Truncation-bootstrap using upstream's `_final_info` mask + `final_observation` obs.
             if isinstance(info, dict) and "final_info" in info:
                 done_mask = info.get("_final_info")
@@ -602,7 +720,20 @@ def main():
                             fo = torch.as_tensor(fo, device=device)
                         fo = fo.to(device)
                         idx = torch.arange(args.num_envs, device=device)[done_mask]
+                        transition_next_obs[done_mask] = fo[done_mask]
                         final_values_buf[step, idx] = agent.get_value(fo[done_mask]).view(-1)
+            next_obs_buf[step] = transition_next_obs
+            extrinsic_reward = reward.to(device).view(-1) * args.reward_scale
+            extrinsic_reward_buf[step] = extrinsic_reward
+            success_buf[step] = adapter.success_from_info(info).float().to(device)
+            episode_end_buf[step] = next_done
+            if intrinsic is not None:
+                with torch.no_grad():
+                    bonus = intrinsic.bonus(obs_buf[step], act_buf[step], transition_next_obs)
+                intrinsic_bonus_buf[step] = bonus
+                rew_buf[step] = extrinsic_reward + args.intrinsic_coef * bonus
+            else:
+                rew_buf[step] = extrinsic_reward
             counts["normal_steps"] += num_normal_slots
             counts["probe_steps"] += num_probe_slots
             counts["allocated_steps"] += num_alloc_slots
@@ -707,6 +838,20 @@ def main():
                     positive = max(0.0, region.p_raw)
                     region.p_ema = args.p_ema_tau * region.p_ema + (1 - args.p_ema_tau) * positive
 
+        # ---------------- intrinsic predictor update ----------------
+        intrinsic_loss_value = 0.0
+        intrinsic_mean_value = float(intrinsic_bonus_buf.mean()) if intrinsic is not None else 0.0
+        if intrinsic is not None:
+            flat_obs = obs_buf.reshape(-1, obs_dim)
+            flat_actions = act_buf.reshape(-1, action_dim)
+            flat_next_obs = next_obs_buf.reshape(-1, obs_dim)
+            for _ in range(args.intrinsic_epochs):
+                intrinsic_optimizer.zero_grad()
+                intrinsic_loss = intrinsic.loss(flat_obs, flat_actions, flat_next_obs)
+                intrinsic_loss.backward()
+                intrinsic_optimizer.step()
+                intrinsic_loss_value = float(intrinsic_loss.detach())
+
         # ---------------- GAE + PPO update ----------------
         with torch.no_grad():
             next_value = agent.get_value(obs).reshape(1, -1).view(-1)
@@ -730,6 +875,33 @@ def main():
             values=val_buf.reshape(-1),
         )
         metrics = ppo_update(agent, optimizer, rollout, args)
+        metrics.update(
+            intrinsic_loss=intrinsic_loss_value,
+            intrinsic_mean=intrinsic_mean_value,
+            intrinsic_std=float(intrinsic_bonus_buf.std(unbiased=False)),
+            intrinsic_max=float(intrinsic_bonus_buf.max()),
+            extrinsic_reward_mean=float(extrinsic_reward_buf.mean()),
+            extrinsic_reward_std=float(extrinsic_reward_buf.std(unbiased=False)),
+            total_reward_mean=float(rew_buf.mean()),
+            total_reward_std=float(rew_buf.std(unbiased=False)),
+            rollout_success_rate=float(success_buf.mean()),
+            rollout_episode_end_rate=float(episode_end_buf.mean()),
+            advantage_mean=float(advantages.mean()),
+            advantage_std=float(advantages.std(unbiased=False)),
+            return_mean=float(returns.mean()),
+            return_std=float(returns.std(unbiased=False)),
+            value_mean=float(val_buf.mean()),
+            value_std=float(val_buf.std(unbiased=False)),
+            action_mean=float(act_buf.mean()),
+            action_std=float(act_buf.std(unbiased=False)),
+            logprob_mean=float(logp_buf.mean()),
+            learning_rate=float(optimizer.param_groups[0]["lr"]),
+            policy_std=float(agent.logstd.exp().mean()),
+            explained_variance=float(
+                1.0 - torch.var(returns - val_buf, unbiased=False)
+                / torch.var(returns, unbiased=False).clamp_min(1e-8)
+            ),
+        )
 
         # ---------------- allocator + logging ----------------
         candidates = archive.candidates(recent_regions, global_steps, args.max_candidates) if use_archive else []
@@ -754,10 +926,20 @@ def main():
         )
 
         # ---------------- eval ----------------
+        region_values = list(archive)
+        sigma_values = np.asarray([r.sigma_ema for r in region_values], dtype=np.float64)
+        p_values = np.asarray([r.p_ema for r in region_values], dtype=np.float64)
+        alignment_values = np.asarray([r.p_raw for r in region_values], dtype=np.float64)
+        visit_values = np.asarray([r.count for r in region_values], dtype=np.float64)
+        staleness_values = np.asarray(
+            [max(0, global_steps - r.last_seen_step) for r in region_values], dtype=np.float64
+        )
+        elapsed = time.monotonic() - start_time
         row = dict(
             global_env_steps=global_steps,
             update=update,
-            wall_time=time.monotonic() - start_time,
+            wall_time=elapsed,
+            steps_per_second=(global_steps - session_start_steps) / max(elapsed, 1e-9),
             eval_return="",
             eval_success="",
             eval_success_final="",
@@ -765,9 +947,28 @@ def main():
             eval_episodes="",
             num_regions=len(archive),
             num_archived_states=sum(len(r.snapshots) for r in archive),
-            mean_sigma=float(np.mean([r.sigma_ema for r in archive]) if len(archive) else 0.0),
-            mean_p=float(np.mean([r.p_ema for r in archive]) if len(archive) else 0.0),
+            mean_sigma=float(sigma_values.mean()) if sigma_values.size else 0.0,
+            std_sigma=float(sigma_values.std()) if sigma_values.size else 0.0,
+            min_sigma=float(sigma_values.min()) if sigma_values.size else 0.0,
+            max_sigma=float(sigma_values.max()) if sigma_values.size else 0.0,
+            mean_p=float(p_values.mean()) if p_values.size else 0.0,
+            std_p=float(p_values.std()) if p_values.size else 0.0,
+            min_p=float(p_values.min()) if p_values.size else 0.0,
+            max_p=float(p_values.max()) if p_values.size else 0.0,
+            mean_alignment=float(alignment_values.mean()) if alignment_values.size else 0.0,
+            alignment_positive_frac=(
+                float((alignment_values > 0).mean()) if alignment_values.size else 0.0
+            ),
+            mean_region_visits=float(visit_values.mean()) if visit_values.size else 0.0,
+            max_region_visits=float(visit_values.max()) if visit_values.size else 0.0,
+            mean_region_staleness=float(staleness_values.mean()) if staleness_values.size else 0.0,
+            num_candidates=len(candidates),
             priority_entropy=float(-(q * q.clamp_min(1e-12).log()).sum()) if q.numel() else 0.0,
+            priority_effective_regions=(
+                float(torch.exp(-(q * q.clamp_min(1e-12).log()).sum())) if q.numel() else 0.0
+            ),
+            priority_min=float(q.min()) if q.numel() else 0.0,
+            priority_max=float(q.max()) if q.numel() else 0.0,
             adv_scale=float(adv_scale_state.std.item()),
             gradient_signature_norm_ref=float(reference_gradient.norm()) if reference_gradient is not None else 0.0,
             gradient_signature_norm_region=float(
@@ -775,14 +976,40 @@ def main():
             ),
             **counts,
             **{f"cumulative_{k}": v for k, v in cumulative.items()},
+            normal_fraction=cumulative["normal_steps"] / max(1, global_steps),
+            probe_fraction=cumulative["probe_steps"] / max(1, global_steps),
+            allocated_fraction=cumulative["allocated_steps"] / max(1, global_steps),
+            reference_fraction=cumulative["reference_steps"] / max(1, global_steps),
             **metrics,
         )
-        if global_steps >= next_eval:
+        did_eval = global_steps >= next_eval
+        if did_eval:
             evaluation = evaluate(eval_adapter, agent, args, device, args.eval_episodes)
             row.update(evaluation)
             if args.save_model:
                 torch.save(
-                    dict(agent=agent.state_dict(), args=asdict(args), global_steps=global_steps),
+                    dict(
+                        format_version=2,
+                        agent=agent.state_dict(),
+                        optimizer=optimizer.state_dict(),
+                        intrinsic=None if intrinsic is None else intrinsic.state_dict(),
+                        intrinsic_optimizer=(
+                            None if intrinsic_optimizer is None else intrinsic_optimizer.state_dict()
+                        ),
+                        args=asdict(args),
+                        global_steps=global_steps,
+                        cumulative=cumulative,
+                        update=update,
+                        next_eval=next_eval + args.eval_interval,
+                        python_rng_state=random.getstate(),
+                        numpy_rng_state=np.random.get_state(),
+                        torch_rng_state=torch.get_rng_state(),
+                        cuda_rng_state_all=(
+                            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+                        ),
+                        generator_state=generator.get_state(),
+                        wandb_run_id=None if wandb_run is None else wandb_run.id,
+                    ),
                     out_dir / f"checkpoint_{global_steps}.pt",
                 )
             next_eval += args.eval_interval
@@ -803,14 +1030,82 @@ def main():
                 )
             )
         logger.log(row)
+        if wandb_run is not None and (did_eval or update % args.wandb_log_every == 0):
+            wandb_payload = {"global_env_steps": global_steps}
+            budget_keys = {
+                "normal_steps", "probe_steps", "allocated_steps", "reference_steps",
+                "normal_fraction", "probe_fraction", "allocated_fraction", "reference_fraction",
+            }
+            ppo_keys = {
+                "policy_loss", "value_loss", "entropy", "approx_kl", "clipfrac",
+                "grad_norm", "ppo_epochs", "ppo_minibatches", "ppo_early_stop",
+                "policy_std", "explained_variance", "learning_rate",
+            }
+            rollout_keys = {
+                "extrinsic_reward_mean", "extrinsic_reward_std",
+                "total_reward_mean", "total_reward_std",
+                "rollout_success_rate", "rollout_episode_end_rate",
+                "advantage_mean", "advantage_std", "return_mean", "return_std",
+                "value_mean", "value_std", "action_mean", "action_std", "logprob_mean",
+            }
+            herp_prefixes = (
+                "num_region", "num_archived", "num_candidates", "mean_sigma", "std_sigma",
+                "min_sigma", "max_sigma", "mean_p", "std_p", "min_p", "max_p",
+                "mean_alignment", "alignment_", "mean_region", "max_region",
+                "priority_", "adv_scale", "gradient_signature_",
+            )
+            for key, value in row.items():
+                if key == "global_env_steps" or value == "":
+                    continue
+                if not isinstance(value, (int, float, np.number)):
+                    continue
+                if key.startswith("eval_"):
+                    metric_name = f"eval/{key.removeprefix('eval_')}"
+                elif key.startswith("cumulative_"):
+                    metric_name = f"budget/cumulative_{key.removeprefix('cumulative_')}"
+                elif key in budget_keys:
+                    metric_name = f"budget/{key}"
+                elif key.startswith("intrinsic_"):
+                    metric_name = f"intrinsic/{key.removeprefix('intrinsic_')}"
+                elif key.startswith(herp_prefixes):
+                    metric_name = f"herp/{key}"
+                elif key in ppo_keys:
+                    metric_name = f"ppo/{key}"
+                elif key in rollout_keys:
+                    metric_name = f"rollout/{key}"
+                else:
+                    metric_name = f"system/{key}"
+                wandb_payload[metric_name] = float(value)
+            if did_eval and region_values:
+                wandb_payload.update(
+                    {
+                        "herp/sigma_hist": wandb_module.Histogram(sigma_values),
+                        "herp/p_hist": wandb_module.Histogram(p_values),
+                        "herp/alignment_hist": wandb_module.Histogram(alignment_values),
+                        "herp/visits_hist": wandb_module.Histogram(visit_values),
+                    }
+                )
+                if q.numel():
+                    wandb_payload["herp/priority_hist"] = wandb_module.Histogram(
+                        q.detach().cpu().numpy()
+                    )
+            wandb_run.log(wandb_payload)
         print(json.dumps(row), flush=True)
 
+    final_wall_time = time.monotonic() - start_time
     (out_dir / "complete.json").write_text(
         json.dumps(
-            dict(global_env_steps=global_steps, counts=cumulative, wall_time=time.monotonic() - start_time),
+            dict(global_env_steps=global_steps, counts=cumulative, wall_time=final_wall_time),
             indent=2,
         )
     )
+    if wandb_run is not None:
+        wandb_run.summary["final/global_env_steps"] = global_steps
+        wandb_run.summary["final/wall_time"] = final_wall_time
+        wandb_run.summary["final/steps_per_second"] = (
+            (global_steps - session_start_steps) / max(final_wall_time, 1e-9)
+        )
+        wandb_run.finish()
     for a in (adapter, ref_adapter, eval_adapter):
         if a is not None:
             a.close()
