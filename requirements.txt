@@ -1,0 +1,55 @@
+# HERP runtime dependencies — pinned to a known-good stack.
+#
+# Python ≥ 3.10 (developed and tested on 3.12).
+#
+# Torch: install the CUDA build FIRST, from the PyTorch wheel index that
+# matches your driver. The line below assumes CUDA 12.8 (the driver family
+# shipped with recent NVIDIA drivers on Linux/WSL2). Adjust the URL for
+# your CUDA runtime if different.
+#
+#   pip install --extra-index-url https://download.pytorch.org/whl/cu128 torch==2.11.0+cu128
+#
+# Then install the rest with:
+#
+#   pip install -r requirements.txt
+#
+# The `torch` line below is left pinned but unindexed so `pip -r` alone will
+# fall back to the CPU wheel if you did not install from the CUDA index
+# beforehand — that is fine on a laptop but will not exercise GPU sim.
+
+# --- Deep-learning core ---
+torch==2.11.0
+
+# --- Numerics / plotting / config ---
+numpy==2.2.6
+scipy==1.16.3
+scikit-learn==1.7.2
+matplotlib==3.10.7
+pandas==2.3.3
+pyyaml==6.0.2
+tabulate==0.10.0
+tqdm==4.67.1
+
+# --- OT baseline (population-side routing) ---
+POT==0.9.7.post1
+
+# --- RL environments ---
+gymnasium==1.3.0
+mani-skill==3.0.1
+metaworld==3.1.1
+mujoco==3.3.0
+gymnasium-robotics==1.5.0  # for FetchPush-v4 / FetchPickAndPlace-v4
+
+# --- Experiment tooling ---
+tyro==1.0.16
+tensorboard==2.20.0
+wandb==0.23.0
+
+# --- Rendering / videos (SAPIEN + eval clips); safe on headless boxes ---
+opencv-python==4.12.0.88
+pillow==12.2.0
+h5py==3.16.0
+
+# --- Dev / test ---
+pytest==9.0.3
+rich==14.3.3

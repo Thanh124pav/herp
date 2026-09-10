@@ -6,3 +6,7 @@ outputs/
 external/
 *.log
 .DS_Store
+runs/
+third_party/
+.venv/
+uv.lock
