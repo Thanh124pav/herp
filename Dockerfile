@@ -25,21 +25,33 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8
 
 # --- System packages (IMPLEMENTATION.md §2.2) -------------------------------
+# Notes on the Python install:
+#   * Ubuntu 22.04 ships Python 3.10; we install 3.12 from the deadsnakes PPA.
+#   * We do NOT install the distro `python3-pip` — that ships pip only for the
+#     system 3.10 interpreter and colliding with our 3.12 caused CI build
+#     failures with "No module named pip" after symlinking `python` -> 3.12.
+#     Instead we bootstrap pip inside the 3.12 interpreter via `ensurepip`
+#     (which is provided by `python3.12-venv`).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential git curl unzip ca-certificates \
-        software-properties-common \
+        software-properties-common gnupg \
         libglib2.0-0 libxext6 libsm6 libxrender1 \
         libglfw3 libglew-dev libglvnd-dev \
         libvulkan1 mesa-vulkan-drivers \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
-        python3.12 python3.12-venv python3.12-dev python3-pip \
+        python3.12 python3.12-venv python3.12-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Python ----------------------------------------------------------------
+# Symlink `python` -> 3.12, then bootstrap pip *for the 3.12 interpreter*.
+# `ensurepip` is shipped with `python3.12-venv` and installs a matching
+# `pip` module inside 3.12's site-packages; only after that will
+# `python -m pip …` succeed.
 RUN ln -sf /usr/bin/python3.12 /usr/local/bin/python \
  && ln -sf /usr/bin/python3.12 /usr/local/bin/python3 \
- && python -m pip install --upgrade pip
+ && python -m ensurepip --upgrade \
+ && python -m pip install --upgrade pip setuptools wheel
 
 WORKDIR /workspace/herp
 
