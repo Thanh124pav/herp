@@ -1,0 +1,17 @@
+# Keep the image small: nothing under here belongs in the container.
+.git
+.venv
+venv
+outputs
+runs
+external
+third_party
+docs/HERP_PILOT_V2_RESULTS.md
+docs/PPO_OFFICIAL_50K.md
+*.egg-info
+__pycache__
+.pytest_cache
+.mypy_cache
+.ipynb_checkpoints
+scratchpad
+.claude

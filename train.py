@@ -1,8 +1,16 @@
-"""HERP training entrypoint: PPO + benchmark adapter + performance-aware allocator."""
+"""HERP training entrypoint — vectorized GPU sim + official PPO backbone.
+
+This is the §4.5 rewrite of the single-env prototype: it runs one big
+``ManiSkillVectorEnv`` (``num_envs≥1024``, ``physx_cuda``) and treats each env
+slot as one of four modes at every step — NORMAL, PROBE, ALLOCATED, REFERENCE
+(§4.5). Slot-mode counters roll into a strict interaction-budget assertion
+(§4.6). The inner PPO loop matches the upstream ManiSkill baseline
+(3-layer 256-wide MLP, orthogonal init, clip-vloss, ``target_kl=0.1``,
+optional linear LR anneal) so the pilot-v3 curves are comparable.
+"""
 from __future__ import annotations
 
 import argparse
-import copy
 import hashlib
 import json
 import os
@@ -11,7 +19,7 @@ import random
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
@@ -20,170 +28,113 @@ import numpy as np
 import torch
 import torch.nn as nn
 import yaml
-from torch.distributions import Normal
+from torch.distributions.normal import Normal
 
 from herp.allocator import AllocationConfig, priority_distribution
 from herp.archive import RegionArchive
 from herp.envs import make_adapter
-from herp.eval import evaluate_policy
 from herp.gradient_signature import (
     empirical_fisher_diagonal,
     policy_gradient_signature,
     signature_parameters,
 )
 from herp.logging import CsvLogger
-from herp.probe import default_obs_tensor, probe_region, reset_to_snapshot
+from herp.probe import probe_rollout, sample_probe_assignment, sigma_from_features
+from herp.reference import collect_reference
 from herp.regions import OnlineRegionizer, RegionizerConfig, RunningNormalizer
 from herp.relevance import cosine_relevance
 from herp.rollout_buffer import ALLOCATED, NORMAL, compute_gae
 from herp.baselines import RND, Disagreement
 
 
+# Slot-mode identifiers -----------------------------------------------------
+MODE_NORMAL = 0
+MODE_PROBE = 1
+MODE_ALLOCATED = 2
+MODE_REFERENCE = 3
+
+
 @dataclass
 class Args:
+    # --- benchmark / task ---
     benchmark: str = "maniskill"
-    env_id: str = "PushCube-v1"
+    env_id: str = "PickCube-v1"
     method: str = "herp"
     seed: int = 0
-    total_timesteps: int = 300_000
-    rollout_horizon: int = 2048
-    allocated_frac: float = 0.25
-    allocated_rollout_horizon: int = 32
-    scoring_interval: int = 5
-    relevance_interval: int = 5
-    reference_horizon: int = 128
-    signature_horizon: int = 32
-    p_estimator: str = "cosine"
-    sigma_estimator: str = "pairwise"
-    fisher_damping: float = 1e-3
-    hybrid_eta: float = 0.5
-    eps_hybrid: float = 1e-6
+    # --- budget ---
+    total_timesteps: int = 5_000_000
+    num_envs: int = 1024
+    num_envs_ref: int = 64
+    num_steps: int = 8
+    reference_horizon: int = 16
+    reference_interval: int = 4
+    # --- ppo ---
     learning_rate: float = 3e-4
-    gamma: float = 0.99
-    gae_lambda: float = 0.95
-    num_minibatches: int = 4
+    anneal_lr: bool = True
+    gamma: float = 0.8
+    gae_lambda: float = 0.9
+    num_minibatches: int = 32
     update_epochs: int = 4
     clip_coef: float = 0.2
+    clip_vloss: bool = False
     ent_coef: float = 0.0
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
+    target_kl: float = 0.1
+    reward_scale: float = 1.0
+    norm_adv: bool = True
     hidden: int = 256
-    region_radius: float = 0.5
+    # --- herp ---
+    probe_frac: float = 0.15
+    allocated_frac: float = 0.10
+    probe_horizon: int = 8
+    probes_per_region: int = 4
+    max_candidates: int = 32
     max_regions: int = 128
     max_snapshots_per_region: int = 8
-    archive_interval: int = 8
-    max_candidates: int = 4
-    probe_horizon: int = 8
-    num_probes: int = 4
-    num_env_repeats: int = 1
-    probe_scale: float = 1.0
-    gamma_branch: float = 0.95
-    lambda_dyn: float = 0.0
-    sigma_ema_tau: float = 0.9  # weight on the OLD estimate
-    p_ema_tau: float = 0.9      # weight on the OLD estimate
-    uniform_mix: float = 0.1
+    region_radius: float = 0.5
+    archive_interval: int = 4
+    scoring_interval: int = 2
+    sigma_ema_tau: float = 0.9  # weight on OLD estimate
+    p_ema_tau: float = 0.9
+    uniform_mix: float = 0.10
     staleness_mix: float = 0.05
+    sigma_estimator: str = "pairwise"
+    p_estimator: str = "cosine"
+    lambda_dyn: float = 0.0
+    hybrid_eta: float = 0.5
+    eps_hybrid: float = 1e-6
+    fisher_damping: float = 1e-3
+    probe_scale: float = 1.0
+    # --- baselines ---
     intrinsic_coef: float = 0.01
     intrinsic_epochs: int = 4
-    eval_interval: int = 25_000
-    eval_episodes: int = 50
-    control_mode: str = "pd_ee_delta_pose"
+    # --- eval ---
+    eval_interval: int = 250_000
+    eval_episodes: int = 100
+    num_eval_envs: int = 8
+    # --- sim / device ---
+    control_mode: str = "pd_joint_delta_pos"
     obs_mode: str = "state"
     reward_mode: str = "dense"
-    sim_backend: str = "physx_cpu"
-    render_backend: str = "cpu"
+    sim_backend: str = "physx_cuda"
+    render_backend: str = "gpu"
+    device: str = "cuda"
+    torch_deterministic: bool = True
+    # --- io ---
     output_dir: str = "outputs/herp"
-    device: str = "cpu"
-    torch_threads: int = 1
-
-
-class Agent(nn.Module):
-    def __init__(self, obs_dim: int, action_dim: int, hidden: int):
-        super().__init__()
-        self.actor = nn.Sequential(
-            nn.Linear(obs_dim, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
-        )
-        self.actor_head = nn.Linear(hidden, action_dim)
-        self.logstd = nn.Parameter(torch.zeros(action_dim))
-        self.critic = nn.Sequential(
-            nn.Linear(obs_dim, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, 1),
-        )
-
-    def get_distribution(self, obs: torch.Tensor) -> Normal:
-        hidden = self.actor(obs.float())
-        mean = self.actor_head(hidden)
-        std = self.logstd.exp().expand_as(mean)
-        return Normal(mean, std)
-
-    def value(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.critic(obs.float()).squeeze(-1)
-
-    def act(self, obs: torch.Tensor, deterministic: bool = False):
-        dist = self.get_distribution(obs)
-        return dist.mean if deterministic else dist.sample()
-
-    def get_action_and_value(self, obs: torch.Tensor, action: torch.Tensor | None = None):
-        dist = self.get_distribution(obs)
-        if action is None:
-            action = dist.sample()
-        logprob = dist.log_prob(action).sum(-1)
-        entropy = dist.entropy().sum(-1)
-        return action, logprob, entropy, self.value(obs)
-
-
-def ppo_update(agent: Agent, optimizer, batch: dict, args: Args) -> dict[str, float]:
-    device = torch.device(args.device)
-    obs = batch["obs"].to(device)
-    actions = batch["actions"].to(device)
-    old_logprobs = batch["logprobs"].to(device)
-    advantages = batch["advantages"].to(device)
-    returns = batch["returns"].to(device)
-    old_values = batch["values"].to(device)
-    advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
-    minibatch = max(1, obs.shape[0] // args.num_minibatches)
-    history = []
-    for _ in range(args.update_epochs):
-        inds = torch.randperm(obs.shape[0], device=device)
-        for start in range(0, obs.shape[0], minibatch):
-            mb = inds[start : start + minibatch]
-            _, newlogprob, entropy, newvalue = agent.get_action_and_value(obs[mb], actions[mb])
-            logratio = newlogprob - old_logprobs[mb]
-            ratio = logratio.exp()
-            pg_loss1 = -advantages[mb] * ratio
-            pg_loss2 = -advantages[mb] * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-            pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-            v_loss = 0.5 * (newvalue - returns[mb]).pow(2).mean()
-            entropy_loss = entropy.mean()
-            loss = pg_loss - args.ent_coef * entropy_loss + args.vf_coef * v_loss
-            optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
-            optimizer.step()
-            with torch.no_grad():
-                approx_kl = ((ratio - 1) - logratio).mean()
-                clipfrac = ((ratio - 1.0).abs() > args.clip_coef).float().mean()
-            history.append((len(mb), {
-                "policy_loss": float(pg_loss.detach().cpu()),
-                "value_loss": float(v_loss.detach().cpu()),
-                "entropy": float(entropy_loss.detach().cpu()),
-                "approx_kl": float(approx_kl.detach().cpu()),
-                "clipfrac": float(clipfrac.detach().cpu()),
-                "old_value_mean": float(old_values.mean().cpu()),
-            }))
-    total = sum(n for n, _ in history)
-    return {key: sum(n * row[key] for n, row in history) / total for key in history[0][1]}
+    save_model: bool = True
 
 
 VALID_METHODS = ("ppo", "herp", "herp_sigma", "herp_p", "rnd", "disagreement", "go_explore", "plr")
 VALID_P_ESTIMATORS = ("cosine", "dot", "fisher", "occupancy", "hybrid")
 VALID_SIGMA_ESTIMATORS = ("pairwise", "branch", "return")
+
+
+def _default_yaml_type(value):
+    if isinstance(value, bool):
+        return lambda s: str(s).lower() in ("1", "true", "yes", "y")
+    return type(value)
 
 
 def parse_args(argv=None):
@@ -199,254 +150,195 @@ def parse_args(argv=None):
         defaults.update(cfg)
     parser = argparse.ArgumentParser(parents=[pre])
     for name, value in asdict(Args()).items():
-        parser.add_argument("--" + name.replace("_", "-"), type=type(value), default=defaults[name])
+        parser.add_argument(
+            "--" + name.replace("_", "-"), type=_default_yaml_type(value), default=defaults[name]
+        )
     parsed = vars(parser.parse_args(argv))
     parsed.pop("config")
     args = Args(**parsed)
     if args.method not in VALID_METHODS:
         parser.error(f"Unknown method {args.method!r}; expected one of {VALID_METHODS}")
     if args.p_estimator not in VALID_P_ESTIMATORS:
-        parser.error(f"Unknown p estimator {args.p_estimator!r}; expected one of {VALID_P_ESTIMATORS}")
+        parser.error(f"Unknown p estimator {args.p_estimator!r}")
     if args.sigma_estimator not in VALID_SIGMA_ESTIMATORS:
         parser.error(f"Unknown sigma estimator {args.sigma_estimator!r}")
-    if not 0 <= args.allocated_frac < 1:
-        parser.error("allocated-frac must be in [0, 1)")
-    positives = (
-        "total_timesteps", "rollout_horizon", "allocated_rollout_horizon", "probe_horizon",
-        "num_probes", "num_env_repeats", "scoring_interval", "relevance_interval",
-        "reference_horizon", "signature_horizon", "archive_interval", "eval_interval",
-        "eval_episodes", "num_minibatches", "update_epochs", "max_candidates", "max_regions",
-        "max_snapshots_per_region", "hidden", "torch_threads",
-    )
-    for name in positives:
-        if getattr(args, name) <= 0:
-            parser.error(f"{name} must be positive")
-    for name in ("uniform_mix", "staleness_mix", "sigma_ema_tau", "p_ema_tau", "gamma",
-                 "gae_lambda", "lambda_dyn", "hybrid_eta"):
-        if not 0 <= getattr(args, name) <= 1:
-            parser.error(f"{name} must be in [0, 1]")
-    if args.fisher_damping <= 0 or args.probe_scale < 0:
-        parser.error("fisher-damping must be positive and probe-scale nonnegative")
+    if not 0 <= args.allocated_frac + args.probe_frac < 1:
+        parser.error("probe_frac + allocated_frac must be in [0, 1)")
     return args
 
 
-def build_adapter(args: Args, benchmark: str | None = None):
-    """Instantiate + open an adapter for the requested benchmark family."""
-    benchmark = benchmark or args.benchmark
-    kwargs = dict(env_id=args.env_id, obs_mode=args.obs_mode, reward_mode=args.reward_mode)
-    if benchmark == "maniskill":
-        kwargs.update(
-            control_mode=args.control_mode,
-            sim_backend=args.sim_backend,
-            render_backend=args.render_backend,
+# ---------------------------------------------------------------------------
+# Agent — copied from the ManiSkill upstream ppo.py (§4.14). Same 3xMLP-256
+# tanh, orthogonal init, actor head std = 0.01*sqrt(2), initial logstd = -0.5.
+# ---------------------------------------------------------------------------
+
+
+def _layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    nn.init.orthogonal_(layer.weight, std)
+    nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+
+class Agent(nn.Module):
+    def __init__(self, obs_dim: int, action_dim: int, hidden: int = 256):
+        super().__init__()
+        self.critic = nn.Sequential(
+            _layer_init(nn.Linear(obs_dim, hidden)),
+            nn.Tanh(),
+            _layer_init(nn.Linear(hidden, hidden)),
+            nn.Tanh(),
+            _layer_init(nn.Linear(hidden, hidden)),
+            nn.Tanh(),
+            _layer_init(nn.Linear(hidden, 1)),
         )
-    adapter = make_adapter(benchmark, **kwargs)
-    adapter.make()
-    return adapter
+        self.actor = nn.Sequential(
+            _layer_init(nn.Linear(obs_dim, hidden)),
+            nn.Tanh(),
+            _layer_init(nn.Linear(hidden, hidden)),
+            nn.Tanh(),
+            _layer_init(nn.Linear(hidden, hidden)),
+            nn.Tanh(),
+        )
+        self.actor_head = _layer_init(nn.Linear(hidden, action_dim), std=0.01 * np.sqrt(2))
+        self.logstd = nn.Parameter(torch.ones(1, action_dim) * -0.5)
+
+    def get_distribution(self, x):
+        hidden = self.actor(x.float())
+        mean = self.actor_head(hidden)
+        std = self.logstd.expand_as(mean).exp()
+        return Normal(mean, std)
+
+    def get_value(self, x):
+        return self.critic(x.float()).squeeze(-1)
+
+    value = get_value
+
+    def act(self, x, deterministic: bool = False):
+        dist = self.get_distribution(x)
+        return dist.mean if deterministic else dist.sample()
+
+    def get_action_and_value(self, x, action=None, deterministic: bool = False):
+        dist = self.get_distribution(x)
+        if action is None:
+            action = dist.mean if deterministic else dist.sample()
+        logprob = dist.log_prob(action).sum(-1)
+        entropy = dist.entropy().sum(-1)
+        return action, logprob, entropy, self.get_value(x)
 
 
-def clamp_action(action, env):
-    low = torch.as_tensor(env.action_space.low, dtype=action.dtype, device=action.device)
-    high = torch.as_tensor(env.action_space.high, dtype=action.dtype, device=action.device)
-    return action.clamp(low, high)
+# ---------------------------------------------------------------------------
+# Vectorized PPO update
+# ---------------------------------------------------------------------------
 
 
-def collect_fragment(env, agent, args, horizon, source, regionizer=None,
-                     archive_states=False, start_snapshot=None, episode_id=0,
-                     global_step=0, reset_seed=None, adapter=None):
-    """Roll out ``horizon`` steps of the current policy; bootstrap on truncation."""
-    if horizon <= 0:
-        raise ValueError("Cannot collect an empty fragment")
-    to_tensor = adapter.obs_tensor if adapter is not None else default_obs_tensor
-    if start_snapshot is None:
-        obs, _ = env.reset(seed=reset_seed)
-        return_so_far = 0.0
-    else:
-        obs, _ = reset_to_snapshot(env, start_snapshot, adapter=adapter)
-        return_so_far = start_snapshot.return_so_far
-    data = {k: [] for k in ("obs", "actions", "logprobs", "rewards", "dones", "values", "next_obs")}
-    recent, episode_returns = [], []
-    for t in range(horizon):
-        obs_t = to_tensor(obs, args.device)
-        if archive_states and regionizer is not None and adapter is not None and t % args.archive_interval == 0:
-            snap_state = adapter.save_state()
-            rid = regionizer.observe_snapshot(
-                snap_state, obs_t.cpu(), global_step + t, episode_id, return_so_far, adapter.elapsed_steps()
-            )
-            recent.append(rid)
-        with torch.no_grad():
-            action, logprob, _, value = agent.get_action_and_value(obs_t[None])
-            applied = clamp_action(action.squeeze(0), env)
-            next_obs, reward, terminated, truncated, _ = env.step(applied.cpu().numpy())
-            next_t = to_tensor(next_obs, args.device)
-            reward_f = float(torch.as_tensor(reward).mean())
-            done = bool(terminated) or bool(truncated)
-            adjusted_reward = reward_f
-            if bool(truncated) and not bool(terminated):
-                adjusted_reward += args.gamma * float(agent.value(next_t[None]))
-        for key, val in dict(obs=obs_t.cpu(), actions=action.squeeze(0).cpu(),
-                             logprobs=logprob.squeeze(0).cpu(), rewards=adjusted_reward,
-                             dones=float(done), values=value.squeeze(0).cpu(),
-                             next_obs=next_t.cpu()).items():
-            data[key].append(val)
-        return_so_far += reward_f
-        obs = next_obs
-        if done:
-            episode_returns.append(return_so_far)
-            episode_id += 1
-            if start_snapshot is not None:
+def ppo_update(agent, optimizer, rollout, args):
+    """Upstream-shaped PPO update; ``rollout`` is a flat dict of tensors on device."""
+    b_obs = rollout["obs"]
+    b_actions = rollout["actions"]
+    b_logprobs = rollout["logprobs"]
+    b_advantages = rollout["advantages"]
+    b_returns = rollout["returns"]
+    b_values = rollout["values"]
+    batch_size = b_obs.shape[0]
+    minibatch = max(1, batch_size // args.num_minibatches)
+
+    inds = torch.randperm(batch_size, device=b_obs.device)
+    metrics = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "approx_kl": 0.0, "clipfrac": 0.0}
+    stop = False
+    steps = 0
+    for epoch in range(args.update_epochs):
+        inds = inds[torch.randperm(batch_size, device=b_obs.device)]
+        for start in range(0, batch_size, minibatch):
+            mb = inds[start : start + minibatch]
+            _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb], b_actions[mb])
+            logratio = newlogprob - b_logprobs[mb]
+            ratio = logratio.exp()
+            with torch.no_grad():
+                approx_kl = ((ratio - 1) - logratio).mean()
+                clipfrac = ((ratio - 1.0).abs() > args.clip_coef).float().mean()
+            mb_adv = b_advantages[mb]
+            if args.norm_adv and mb_adv.numel() > 1:
+                mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
+            pg1 = -mb_adv * ratio
+            pg2 = -mb_adv * ratio.clamp(1 - args.clip_coef, 1 + args.clip_coef)
+            pg_loss = torch.max(pg1, pg2).mean()
+            newvalue = newvalue.view(-1)
+            if args.clip_vloss:
+                v_unc = (newvalue - b_returns[mb]).pow(2)
+                v_clip = b_values[mb] + (newvalue - b_values[mb]).clamp(-args.clip_coef, args.clip_coef)
+                v_loss = 0.5 * torch.max(v_unc, (v_clip - b_returns[mb]).pow(2)).mean()
+            else:
+                v_loss = 0.5 * (newvalue - b_returns[mb]).pow(2).mean()
+            loss = pg_loss - args.ent_coef * entropy.mean() + args.vf_coef * v_loss
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+            optimizer.step()
+            metrics["policy_loss"] += float(pg_loss.detach())
+            metrics["value_loss"] += float(v_loss.detach())
+            metrics["entropy"] += float(entropy.mean().detach())
+            metrics["approx_kl"] += float(approx_kl.detach())
+            metrics["clipfrac"] += float(clipfrac.detach())
+            steps += 1
+            if args.target_kl and approx_kl > args.target_kl:
+                stop = True
                 break
-            obs, _ = env.reset()
-            return_so_far = 0.0
-    batch = {k: torch.stack(v).float() if isinstance(v[0], torch.Tensor) else torch.tensor(v).float()
-             for k, v in data.items()}
-    with torch.no_grad():
-        next_value = agent.value(to_tensor(obs, args.device)[None]).squeeze(0).cpu()
-    batch["advantages"], batch["returns"] = compute_gae(
-        batch["rewards"], batch["dones"], batch["values"], next_value, args.gamma, args.gae_lambda
+        if stop:
+            break
+    for k in metrics:
+        metrics[k] /= max(1, steps)
+    return metrics
+
+
+# ---------------------------------------------------------------------------
+# Vectorized eval
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def evaluate(adapter, agent, args, device, episodes: int) -> dict:
+    obs, _ = adapter.reset(seed=args.seed + 1_000_000)
+    returns = torch.zeros(adapter.num_envs, device=device)
+    successes = torch.zeros(adapter.num_envs, device=device)
+    finished = torch.zeros(adapter.num_envs, dtype=torch.bool, device=device)
+    ep_returns: list[float] = []
+    ep_successes: list[float] = []
+    steps = 0
+    max_steps = min(20_000, max(adapter.max_episode_steps * 4, 200))
+    while len(ep_returns) < episodes and steps < max_steps:
+        action = agent.act(obs.to(device), deterministic=True)
+        action = action.clamp(adapter.action_low(), adapter.action_high())
+        obs, reward, term, trunc, info = adapter.step(action)
+        reward = reward.to(device).float()
+        returns = returns + reward * (~finished).float()
+        successes = torch.maximum(successes, adapter.success_from_info(info).float().to(device))
+        done = (term.to(device) | trunc.to(device)) & ~finished
+        for i in torch.where(done)[0].tolist():
+            ep_returns.append(float(returns[i].item()))
+            ep_successes.append(float(successes[i].item()))
+            finished[i] = True
+        steps += 1
+        if finished.all():
+            break
+    return dict(
+        eval_return=float(np.mean(ep_returns)) if ep_returns else 0.0,
+        eval_success=float(np.mean(ep_successes)) if ep_successes else 0.0,
+        eval_success_final=float(np.mean(ep_successes)) if ep_successes else 0.0,
+        eval_steps=steps * adapter.num_envs,
+        eval_episodes=len(ep_returns),
     )
-    batch.update(
-        steps=len(data["obs"]),
-        source=torch.full((len(data["obs"]),), source, dtype=torch.long),
-        recent_regions=recent,
-        episode_id=episode_id,
-        next_value=next_value,
-        episode_returns=episode_returns,
-    )
-    return batch
 
 
-def concat_batches(batches):
-    batches = [b for b in batches if b["steps"] > 0]
-    keys = ("obs", "actions", "logprobs", "advantages", "returns", "values", "source")
-    return {**{k: torch.cat([b[k] for b in batches]) for k in keys},
-            "steps": sum(b["steps"] for b in batches)}
+# ---------------------------------------------------------------------------
+# Provenance
+# ---------------------------------------------------------------------------
 
 
-def signature(agent, batch, device, adv_scale=None):
-    """Score-function signature with a *shared* adv scale (IMPLEMENTATION.md §8)."""
-    return policy_gradient_signature(
-        agent,
-        batch["obs"].to(device),
-        batch["actions"].to(device),
-        batch["advantages"].to(device),
-        adv_scale=adv_scale,
-    )
-
-
-def occupancy_scores(regionizer, observations):
-    centers = torch.stack([r.centroid for r in regionizer.archive])
-    features = torch.stack([regionizer.phi(obs) for obs in observations])
-    ids = torch.cdist(features, centers).argmin(1)
-    return torch.bincount(ids, minlength=len(centers)).float() / len(ids)
-
-
-def _hybrid_score(occ_val: float, grad_val: float, eta: float, eps: float) -> float:
-    grad_pos = max(0.0, grad_val)
-    return (occ_val + eps) ** eta * (grad_pos + eps) ** (1.0 - eta)
-
-
-def update_region_scores(env, agent, args, archive, regionizer, recent_regions,
-                         reference_gradient, step, max_probe_steps, reference_batch=None,
-                         fisher=None, adapter=None, adv_scale=None):
-    use_sigma = args.method not in ("herp_p", "go_explore", "plr")
-    use_gradient = (
-        args.method in ("herp", "herp_p")
-        and args.p_estimator in ("cosine", "dot", "fisher", "hybrid")
-    )
-    cost = args.num_probes * args.num_env_repeats * args.probe_horizon if use_sigma else 0
-    cost += args.signature_horizon if use_gradient or args.method == "plr" else 0
-    n = min(args.max_candidates, max_probe_steps // max(cost, 1))
-    candidates = archive.candidates(recent_regions, step, max_candidates=n)
-    probe_steps, signature_steps, batches, gradients = 0, 0, [], {}
-    if reference_batch is not None:
-        occ = occupancy_scores(regionizer, reference_batch["obs"])
-    else:
-        occ = torch.zeros(len(archive))
-    for region in candidates:
-        snapshot = archive.sample_snapshot(region)
-        first = region.last_probed_step == 0
-        if use_sigma:
-            stats = probe_region(
-                env, snapshot, agent, regionizer,
-                args.num_probes, args.num_env_repeats, args.probe_horizon,
-                args.probe_scale, args.gamma_branch, args.lambda_dyn,
-                device=args.device, estimator=args.sigma_estimator, gamma=args.gamma,
-                adapter=adapter,
-            )
-            probe_steps += stats["steps"]
-            region.sigma_raw = stats["sigma"]
-            region.sigma_ema = (
-                region.sigma_raw
-                if first
-                else args.sigma_ema_tau * region.sigma_ema + (1 - args.sigma_ema_tau) * region.sigma_raw
-            )
-        else:
-            region.sigma_ema = 1.0
-
-        grad_alignment = 0.0
-        if use_gradient or args.method == "plr":
-            batch = collect_fragment(
-                env, agent, args, args.signature_horizon, ALLOCATED,
-                start_snapshot=snapshot, adapter=adapter,
-            )
-            signature_steps += batch["steps"]
-            batches.append(batch)  # real on-policy samples, reused for PPO training
-            grad = signature(agent, batch, args.device, adv_scale=adv_scale)
-            region.gradient_norm = float(grad.norm())
-            gradients[region.region_id] = grad
-            if args.method == "plr":
-                region.p_raw = float(batch["advantages"].abs().mean())
-                grad_alignment = region.p_raw
-            elif args.p_estimator == "cosine":
-                region.p_raw = cosine_relevance(grad, reference_gradient)
-                grad_alignment = region.p_raw
-            elif args.p_estimator == "dot":
-                region.p_raw = float(torch.dot(grad, reference_gradient))
-                grad_alignment = region.p_raw
-            elif args.p_estimator == "fisher":
-                region.p_raw = float(torch.dot(reference_gradient, grad / (fisher + args.fisher_damping)))
-                grad_alignment = region.p_raw
-            else:  # hybrid: combine occupancy and cosine alignment
-                grad_alignment = cosine_relevance(grad, reference_gradient)
-                region.p_raw = _hybrid_score(
-                    float(occ[region.region_id]), grad_alignment, args.hybrid_eta, args.eps_hybrid
-                )
-        elif args.method == "go_explore":
-            region.p_raw = 1.0 / np.sqrt(region.count + 1)
-        elif args.method == "herp_sigma":
-            region.p_raw = 1.0
-        else:  # occupancy-only (or herp with p_estimator=occupancy)
-            region.p_raw = float(occ[region.region_id])
-        region.last_probed_step = step
-
-    scale = 1.0
-    if candidates and args.p_estimator in ("dot", "fisher"):
-        scale = max(float(np.median([abs(r.p_raw) for r in candidates])), 1e-8)
-    for region in candidates:
-        positive = max(0.0, region.p_raw / scale)
-        region.p_ema = args.p_ema_tau * region.p_ema + (1 - args.p_ema_tau) * positive
-        if args.method == "herp_sigma":
-            region.p_ema = 1.0
-    return candidates, probe_steps, signature_steps, batches
-
-
-def save_checkpoint(path, agent, optimizer, args, archive, regionizer, steps, update):
-    payload = dict(
-        agent=agent.state_dict(), optimizer=optimizer.state_dict(), config=asdict(args),
-        archive=archive, regionizer=regionizer, global_env_steps=steps, update=update,
-        torch_rng=torch.get_rng_state(), numpy_rng=np.random.get_state(),
-        python_rng=random.getstate(),
-    )
-    temporary = path.with_suffix(".tmp")
-    torch.save(payload, temporary)
-    temporary.replace(path)
-
-
-def git_commit_sha() -> str | None:
+def _git_sha() -> str | None:
     try:
         out = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parent,
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
             stderr=subprocess.DEVNULL,
         )
         return out.decode().strip()
@@ -454,256 +346,404 @@ def git_commit_sha() -> str | None:
         return None
 
 
-def benchmark_version(benchmark: str) -> str | None:
+def _git_dirty() -> bool:
     try:
-        if benchmark == "maniskill":
-            import mani_skill
-            return getattr(mani_skill, "__version__", None)
-        if benchmark == "metaworld":
-            import metaworld
-            return getattr(metaworld, "__version__", None)
-        if benchmark == "fetch":
-            import gymnasium_robotics
-            return getattr(gymnasium_robotics, "__version__", None)
+        out = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=Path(__file__).resolve().parent,
+            stderr=subprocess.DEVNULL,
+        )
+        return bool(out.strip())
+    except Exception:
+        return False
+
+
+def _pkg_version(mod: str) -> str | None:
+    try:
+        return __import__(mod).__version__
     except Exception:
         return None
-    return None
 
 
-def write_provenance(out_dir: Path, args: Args, sources: list[Path]) -> None:
+def write_provenance(out_dir: Path, args: Args) -> None:
     payload = {
-        "source_hashes": {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
         "python": platform.python_version(),
         "torch": torch.__version__,
         "numpy": np.__version__,
-        "benchmark": args.benchmark,
-        "benchmark_version": benchmark_version(args.benchmark),
-        "git_commit": git_commit_sha(),
+        "mani_skill": _pkg_version("mani_skill"),
+        "metaworld": _pkg_version("metaworld"),
+        "gymnasium_robotics": _pkg_version("gymnasium_robotics"),
+        "mujoco": _pkg_version("mujoco"),
+        "git_sha": _git_sha(),
+        "git_dirty": _git_dirty(),
         "seed": args.seed,
         "device": args.device,
         "sim_backend": args.sim_backend,
-        "render_backend": args.render_backend,
+        "num_envs": args.num_envs,
         "total_timesteps": args.total_timesteps,
+        "hostname": platform.node(),
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "cli": sys.argv,
     }
     (out_dir / "provenance.json").write_text(json.dumps(payload, indent=2))
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def _build_adapter(args: Args, num_envs: int):
+    kwargs = dict(env_id=args.env_id, obs_mode=args.obs_mode, reward_mode=args.reward_mode)
+    if args.benchmark == "maniskill":
+        kwargs.update(
+            control_mode=args.control_mode,
+            sim_backend=args.sim_backend,
+            render_backend=args.render_backend,
+            device=args.device,
+        )
+    else:
+        kwargs.update(device=args.device if args.device == "cpu" else "cpu")
+    adapter = make_adapter(args.benchmark, **kwargs)
+    adapter.make(num_envs=num_envs, seed=args.seed)
+    return adapter
+
+
 def main():
     args = parse_args()
-    torch.set_num_threads(args.torch_threads)
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    start_time = time.monotonic()
+    if args.torch_deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+    device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
     out_dir = Path(args.output_dir) / f"{args.env_id}_{args.method}_seed{args.seed}_{time.time_ns()}"
-    out_dir.mkdir(parents=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "config.json").write_text(json.dumps(asdict(args), indent=2))
     logger = CsvLogger(out_dir / "metrics.csv")
     region_logger = CsvLogger(out_dir / "regions.csv")
 
-    # Adapter build sets any benchmark-specific env vars (e.g. Vulkan ICD on WSL)
-    # BEFORE any code path can import the simulator. Write provenance afterwards
-    # so ``benchmark_version`` can safely ``import mani_skill``.
-    adapter = build_adapter(args)
-    ref_adapter = build_adapter(args)
-    eval_adapter = build_adapter(args)
-    sources = [Path(__file__), *Path("src/herp").rglob("*.py")]
-    write_provenance(out_dir, args, sources)
-    env, ref_env, eval_env = adapter.env, ref_adapter.env, eval_adapter.env
-    obs, _ = env.reset(seed=args.seed)
-    obs_dim = adapter.obs_tensor(obs).numel()
-    action_dim = int(np.prod(env.action_space.shape))
-    agent = Agent(obs_dim, action_dim, args.hidden).to(args.device)
+    adapter = _build_adapter(args, args.num_envs)
+    write_provenance(out_dir, args)
+    obs_dim = adapter.obs_dim
+    action_dim = adapter.action_dim
+    agent = Agent(obs_dim, action_dim, args.hidden).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+
+    ref_adapter = None
+    if args.method in ("herp", "herp_p"):
+        ref_adapter = _build_adapter(args, args.num_envs_ref)
+    eval_adapter = _build_adapter(args, args.num_eval_envs)
+
     archive = RegionArchive(args.max_snapshots_per_region, args.seed)
     regionizer = OnlineRegionizer(
-        obs_dim, archive,
+        obs_dim,
+        archive,
         RegionizerConfig(region_radius=args.region_radius, max_regions=args.max_regions),
     )
-    intrinsic = (
-        RND(obs_dim, action_dim) if args.method == "rnd"
-        else Disagreement(obs_dim, action_dim) if args.method == "disagreement"
-        else None
-    )
+    intrinsic = None
+    if args.method == "rnd":
+        intrinsic = RND(obs_dim, action_dim).to(device)
+    elif args.method == "disagreement":
+        intrinsic = Disagreement(obs_dim, action_dim).to(device)
+    intrinsic_optimizer = None
     if intrinsic is not None:
-        intrinsic.to(args.device)
         intrinsic_optimizer = torch.optim.Adam(
             [p for p in intrinsic.parameters() if p.requires_grad], lr=args.learning_rate
         )
-        obs_normalizer, bonus_normalizer = RunningNormalizer(obs_dim), RunningNormalizer(1)
-
     use_archive = args.method not in ("ppo", "rnd", "disagreement")
     needs_reference = args.method in ("herp", "herp_p")
-    global_steps, update, eval_total = 0, 0, 0
+
+    obs, _ = adapter.reset(seed=args.seed)
+    obs = obs.to(device).float()
+    next_done = torch.zeros(args.num_envs, dtype=torch.bool, device=device)
+
+    global_steps = 0
     cumulative = dict(normal_steps=0, probe_steps=0, allocated_steps=0, reference_steps=0)
-    reference_batch, reference_gradient, fisher = None, None, None
-    candidates = []
-    adv_scale_state = RunningNormalizer(1)
-    generator = torch.Generator().manual_seed(args.seed)
     next_eval = args.eval_interval
-    initial = evaluate_policy(eval_env, agent, args.eval_episodes, args.device, adapter=eval_adapter)
-    eval_total += initial["eval_steps"]
-    (out_dir / "initial_eval.json").write_text(json.dumps(initial))
-    evaluation = initial
+    generator = torch.Generator().manual_seed(args.seed)
+    adv_scale_state = RunningNormalizer(1)
+    reference_gradient = None
+    fisher_diag = None
+    candidates: list = []
+    q = torch.zeros(0)
+    recent_regions: list[int] = []
+    update = 0
+    start_time = time.monotonic()
+
+    max_updates = max(1, args.total_timesteps // (args.num_envs * args.num_steps))
 
     while global_steps < args.total_timesteps:
-        round_budget = min(args.rollout_horizon, args.total_timesteps - global_steps, next_eval - global_steps)
-        extra = int(round_budget * args.allocated_frac) if use_archive else 0
-        normal_horizon = max(1, round_budget - extra)
-        counts = dict(normal_steps=0, probe_steps=0, allocated_steps=0, reference_steps=0)
-        normal = collect_fragment(
-            env, agent, args, normal_horizon, NORMAL, regionizer, use_archive,
-            global_step=global_steps, adapter=adapter,
-        )
-        counts["normal_steps"] += normal["steps"]
-        batches = [normal]
-        remaining = round_budget - normal["steps"]
+        if args.anneal_lr:
+            frac = 1.0 - update / max_updates
+            optimizer.param_groups[0]["lr"] = frac * args.learning_rate
 
-        # Update the shared advantage scale with the raw (unnormalized) training advantages.
-        adv_scale_state.update(normal["advantages"].reshape(-1, 1))
-        adv_scale = max(float(adv_scale_state.std.item()), 1e-6)
+        # ---------------- rollout with per-slot modes ----------------
+        num_probe_slots = int(args.probe_frac * args.num_envs) if use_archive and candidates else 0
+        num_alloc_slots = int(args.allocated_frac * args.num_envs) if use_archive and candidates else 0
+        num_normal_slots = args.num_envs - num_probe_slots - num_alloc_slots
 
-        reference_refreshed = False
-        if needs_reference and remaining > 0 and (
-            reference_batch is None or update % args.relevance_interval == 0
-        ):
-            horizon = min(args.reference_horizon, remaining)
-            reference_batch = collect_fragment(
-                ref_env, agent, args, horizon, 3,
-                reset_seed=1_000_000 + args.seed * 10_000 + update,
-                adapter=ref_adapter,
+        obs_buf = torch.zeros(args.num_steps, args.num_envs, obs_dim, device=device)
+        act_buf = torch.zeros(args.num_steps, args.num_envs, action_dim, device=device)
+        logp_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
+        rew_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
+        val_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
+        done_buf = torch.zeros(args.num_steps, args.num_envs, device=device)
+        mode_buf = torch.zeros(args.num_steps, args.num_envs, dtype=torch.long, device=device)
+
+        # Probe assignment (fixed for this rollout window)
+        probe_regions: list = []
+        probe_snaps: list = []
+        probe_slot_ids = torch.arange(num_probe_slots, device=device, dtype=torch.long)
+        if num_probe_slots > 0 and candidates:
+            probe_regions, probe_snaps, _ = sample_probe_assignment(
+                candidates, q, num_probe_slots, args.probes_per_region, generator
             )
-            counts["reference_steps"] += reference_batch["steps"]
-            remaining -= reference_batch["steps"]
-            reference_refreshed = True
-        if reference_refreshed:
-            reference_gradient = signature(agent, reference_batch, args.device, adv_scale=adv_scale)
+            snaps_state = [s.env_state for s in probe_snaps]
+            new_obs = adapter.restore_state(probe_slot_ids.cpu(), snaps_state)
+            obs[: num_probe_slots] = new_obs.to(device)
+
+        # Allocated restore
+        alloc_slot_ids = torch.arange(
+            num_probe_slots, num_probe_slots + num_alloc_slots, device=device, dtype=torch.long
+        )
+        if num_alloc_slots > 0 and candidates:
+            regs, snaps, _ = sample_probe_assignment(
+                candidates, q, num_alloc_slots, 1, generator
+            )
+            snaps_state = [s.env_state for s in snaps]
+            new_obs = adapter.restore_state(alloc_slot_ids.cpu(), snaps_state)
+            obs[num_probe_slots : num_probe_slots + num_alloc_slots] = new_obs.to(device)
+
+        # Rollout
+        counts = dict(normal_steps=0, probe_steps=0, allocated_steps=0, reference_steps=0)
+        step_modes = torch.zeros(args.num_envs, dtype=torch.long, device=device)
+        step_modes[probe_slot_ids] = MODE_PROBE
+        step_modes[alloc_slot_ids] = MODE_ALLOCATED
+
+        for step in range(args.num_steps):
+            obs_buf[step] = obs
+            done_buf[step] = next_done.float()
+            mode_buf[step] = step_modes
+            with torch.no_grad():
+                action, logprob, _ent, value = agent.get_action_and_value(obs)
+                val_buf[step] = value.view(-1)
+            act_buf[step] = action
+            logp_buf[step] = logprob
+            applied = action.clamp(adapter.action_low(), adapter.action_high())
+            next_obs, reward, term, trunc, info = adapter.step(applied)
+            reward = reward.to(device).float() * args.reward_scale
+            rew_buf[step] = reward
+            next_done = (term.to(device) | trunc.to(device))
+            counts["normal_steps"] += num_normal_slots
+            counts["probe_steps"] += num_probe_slots
+            counts["allocated_steps"] += num_alloc_slots
+            # After the first probe step slots continue as NORMAL for the rest of
+            # the rollout window (they've been restored; further transitions are
+            # ordinary policy training samples).
+            step_modes = torch.full_like(step_modes, MODE_NORMAL)
+            obs = next_obs.to(device).float()
+
+            # Archive new observations from NORMAL slots
+            if use_archive and (step % args.archive_interval == 0):
+                # Assign regions for a subsample of NORMAL slots
+                sample_n = min(args.num_envs, 64)
+                sample_ids = torch.randperm(args.num_envs, generator=generator)[:sample_n]
+                for i in sample_ids.tolist():
+                    rid = regionizer.assign(obs[i].detach().cpu(), global_steps + counts["normal_steps"])
+                    recent_regions.append(rid)
+                # Save snapshots for a small tail — the archive itself caps per-region snapshots.
+                if len(archive) > 0:
+                    ids_to_save = sample_ids[: min(16, len(sample_ids))].to("cpu")
+                    snaps = adapter.save_state(ids_to_save)
+                    region_ids = [regionizer.assign(obs[i].detach().cpu(),
+                                                   global_steps + counts["normal_steps"],
+                                                   update_stats=False)
+                                  for i in ids_to_save.tolist()]
+                    archive.add(ids_to_save, snaps, region_ids, obs.detach().cpu(),
+                                global_steps + counts["normal_steps"])
+
+        # ---------------- reference rollout (also counted) ----------------
+        if needs_reference and (update % args.reference_interval == 0):
+            adv_scale = max(float(adv_scale_state.std.item()), 1e-6)
+            ref_batch = collect_reference(
+                ref_adapter, agent, args.reference_horizon, device,
+                adv_scale=adv_scale, seed=1_000_000 + args.seed * 10_000 + update,
+            )
+            counts["reference_steps"] += ref_batch.steps
+            reference_gradient = policy_gradient_signature(
+                agent,
+                ref_batch.obs.to(device),
+                ref_batch.actions.to(device),
+                ref_batch.advantages.to(device),
+                adv_scale=adv_scale,
+            )
             if args.p_estimator == "fisher":
-                fisher = empirical_fisher_diagonal(
-                    agent, reference_batch["obs"].to(args.device), reference_batch["actions"].to(args.device)
+                fisher_diag = empirical_fisher_diagonal(
+                    agent, ref_batch.obs.to(device), ref_batch.actions.to(device)
                 )
 
-        if use_archive and remaining > 0 and (not needs_reference or reference_gradient is not None) \
-                and update % args.scoring_interval == 0:
-            candidates, probe_steps, signature_steps, signature_batches = update_region_scores(
-                env, agent, args, archive, regionizer, normal["recent_regions"],
-                reference_gradient, global_steps + normal["steps"], remaining,
-                reference_batch, fisher, adapter=adapter, adv_scale=adv_scale,
+        # ---------------- σ and p_v estimation from probe slots ----------
+        if use_archive and probe_regions:
+            # Compressed future was the obs after `num_steps` — use the value tail.
+            # Here we treat each PROBE slot's post-restore trajectory (obs_buf[0..num_steps])
+            # as its future rollout. Group by region for σ.
+            slot_features = obs_buf.mean(dim=0)[:num_probe_slots].detach().cpu()  # [P, D]
+            region_of_slot = [r.region_id for r in probe_regions]
+            probe_of_slot = list(range(num_probe_slots))
+            sigmas = sigma_from_features(
+                slot_features, region_of_slot, probe_of_slot,
+                lambda_dyn=args.lambda_dyn, estimator=args.sigma_estimator,
             )
-            counts["probe_steps"] += probe_steps
-            counts["allocated_steps"] += signature_steps
-            remaining -= probe_steps + signature_steps
-            batches.extend(signature_batches)
+            for rid, s in sigmas.items():
+                region = archive.regions[rid]
+                first = region.sigma_ema == 0.0
+                region.sigma_raw = float(s)
+                region.sigma_ema = (
+                    region.sigma_raw
+                    if first
+                    else args.sigma_ema_tau * region.sigma_ema
+                    + (1 - args.sigma_ema_tau) * region.sigma_raw
+                )
 
-        allocation = {}
+            if (
+                needs_reference
+                and reference_gradient is not None
+                and update % args.scoring_interval == 0
+            ):
+                # Compute a region gradient signature from the ALLOCATED transitions
+                # of each region (that's exactly the "on-policy, region-local"
+                # sample the p_v estimator wants).
+                for rid in set(region_of_slot):
+                    mask = (mode_buf.view(-1) == MODE_ALLOCATED) | (
+                        mode_buf.view(-1) == MODE_PROBE
+                    )
+                    reg_obs = obs_buf.reshape(-1, obs_dim)[mask]
+                    reg_act = act_buf.reshape(-1, action_dim)[mask]
+                    reg_adv = (rew_buf.reshape(-1) - val_buf.reshape(-1))[mask]
+                    if reg_obs.numel() == 0:
+                        continue
+                    adv_scale = max(float(adv_scale_state.std.item()), 1e-6)
+                    grad = policy_gradient_signature(
+                        agent, reg_obs, reg_act, reg_adv, adv_scale=adv_scale
+                    )
+                    region = archive.regions[rid]
+                    region.gradient_norm = float(grad.norm())
+                    if args.p_estimator == "cosine":
+                        region.p_raw = cosine_relevance(grad, reference_gradient)
+                    elif args.p_estimator == "dot":
+                        region.p_raw = float(torch.dot(grad, reference_gradient))
+                    elif args.p_estimator == "fisher" and fisher_diag is not None:
+                        region.p_raw = float(
+                            torch.dot(reference_gradient, grad / (fisher_diag + args.fisher_damping))
+                        )
+                    else:
+                        region.p_raw = cosine_relevance(grad, reference_gradient)
+                    positive = max(0.0, region.p_raw)
+                    region.p_ema = args.p_ema_tau * region.p_ema + (1 - args.p_ema_tau) * positive
+
+        # ---------------- GAE + PPO update ----------------
+        with torch.no_grad():
+            next_value = agent.get_value(obs).view(-1)
+        advantages, returns = compute_gae(
+            rew_buf, done_buf, val_buf, next_value, args.gamma, args.gae_lambda
+        )
+        adv_scale_state.update(advantages.reshape(-1, 1).detach().cpu())
+        rollout = dict(
+            obs=obs_buf.reshape(-1, obs_dim),
+            actions=act_buf.reshape(-1, action_dim),
+            logprobs=logp_buf.reshape(-1),
+            advantages=advantages.reshape(-1),
+            returns=returns.reshape(-1),
+            values=val_buf.reshape(-1),
+        )
+        metrics = ppo_update(agent, optimizer, rollout, args)
+
+        # ---------------- allocator + logging ----------------
+        candidates = archive.candidates(recent_regions, global_steps, args.max_candidates) if use_archive else []
+        recent_regions = recent_regions[-256:]
         cfg = AllocationConfig(
-            uniform_mix=args.uniform_mix, staleness_mix=args.staleness_mix,
-            current_step=global_steps + normal["steps"],
+            uniform_mix=args.uniform_mix,
+            staleness_mix=args.staleness_mix,
+            current_step=global_steps,
             beta=0.0 if args.method in ("herp_p", "plr", "go_explore") else 1.0,
+            alpha=0.0 if args.method in ("herp_sigma", "go_explore") else 1.0,
         )
         q = priority_distribution(candidates, cfg)
         for region, priority in zip(candidates, q):
             region.priority = float(priority)
-        while remaining > 0:
-            if candidates:
-                draw = int(torch.multinomial(q, 1, generator=generator))
-                region = candidates[draw]
-                fragment = collect_fragment(
-                    env, agent, args,
-                    min(remaining, args.allocated_rollout_horizon),
-                    ALLOCATED, start_snapshot=archive.sample_snapshot(region),
-                    adapter=adapter,
-                )
-                allocation[region.region_id] = allocation.get(region.region_id, 0) + fragment["steps"]
-                counts["allocated_steps"] += fragment["steps"]
-            else:
-                fragment = collect_fragment(
-                    env, agent, args, remaining, NORMAL, regionizer, use_archive,
-                    global_step=global_steps + round_budget - remaining, adapter=adapter,
-                )
-                counts["normal_steps"] += fragment["steps"]
-            batches.append(fragment)
-            remaining -= fragment["steps"]
 
-        intrinsic_loss, intrinsic_mean = 0.0, 0.0
-        if intrinsic is not None:
-            obs_normalizer.update(normal["obs"])
-            x = obs_normalizer.normalize(normal["obs"]).to(args.device)
-            y = obs_normalizer.normalize(normal["next_obs"]).to(args.device)
-            a = clamp_action(normal["actions"].to(args.device), env)
-            with torch.no_grad():
-                bonus = intrinsic.bonus(x, a, y).cpu()
-                bonus_normalizer.update(bonus[:, None])
-                bonus = (bonus / bonus_normalizer.std.item()).clamp(0, 10)
-                intrinsic_mean = float(bonus.mean())
-                normal["advantages"], normal["returns"] = compute_gae(
-                    normal["rewards"] + args.intrinsic_coef * bonus, normal["dones"],
-                    normal["values"], normal["next_value"], args.gamma, args.gae_lambda,
-                )
-            for _ in range(args.intrinsic_epochs):
-                loss = intrinsic.loss(x, a, y)
-                intrinsic_optimizer.zero_grad()
-                loss.backward()
-                intrinsic_optimizer.step()
-                intrinsic_loss += float(loss.detach()) / args.intrinsic_epochs
-
-        global_steps += sum(counts.values())
-        assert sum(counts.values()) == round_budget
         for key in counts:
             cumulative[key] += counts[key]
-        assert sum(cumulative.values()) == global_steps <= args.total_timesteps
-
-        metrics = ppo_update(agent, optimizer, concat_batches(batches), args)
+        global_steps = sum(cumulative.values())
         update += 1
+        assert global_steps <= args.total_timesteps + args.num_envs * args.num_steps, (
+            f"budget breach: {global_steps} > {args.total_timesteps}"
+        )
 
-        sigmas = [r.sigma_ema for r in archive] or [0.0]
-        ps = [r.p_ema for r in archive] or [0.0]
+        # ---------------- eval ----------------
         row = dict(
-            global_env_steps=global_steps, update=update,
+            global_env_steps=global_steps,
+            update=update,
             wall_time=time.monotonic() - start_time,
-            train_return=float(np.mean(normal["episode_returns"])) if normal["episode_returns"] else "",
-            eval_return="", eval_success="", eval_success_final="", eval_steps="", eval_episodes="",
-            cumulative_eval_steps=eval_total,
+            eval_return="",
+            eval_success="",
+            eval_success_final="",
+            eval_steps="",
+            eval_episodes="",
             num_regions=len(archive),
             num_archived_states=sum(len(r.snapshots) for r in archive),
-            mean_sigma=float(np.mean(sigmas)), median_sigma=float(np.median(sigmas)),
-            max_sigma=float(np.max(sigmas)),
-            mean_p=float(np.mean(ps)), median_p=float(np.median(ps)),
-            fraction_positive_alignment=float(np.mean([r.p_raw > 0 for r in candidates])) if candidates else 0.0,
-            priority_entropy=float(-(q * q.clamp_min(1e-12).log()).sum()),
-            allocation_histogram=json.dumps(allocation),
-            adv_scale=float(adv_scale),
+            mean_sigma=float(np.mean([r.sigma_ema for r in archive]) if len(archive) else 0.0),
+            mean_p=float(np.mean([r.p_ema for r in archive]) if len(archive) else 0.0),
+            priority_entropy=float(-(q * q.clamp_min(1e-12).log()).sum()) if q.numel() else 0.0,
+            adv_scale=float(adv_scale_state.std.item()),
             gradient_signature_norm_ref=float(reference_gradient.norm()) if reference_gradient is not None else 0.0,
-            gradient_signature_norm_region=float(np.mean([r.gradient_norm for r in candidates])) if candidates else 0.0,
-            intrinsic_loss=intrinsic_loss, intrinsic_mean=intrinsic_mean,
-            **counts, **{f"cumulative_{k}": v for k, v in cumulative.items()}, **metrics,
+            gradient_signature_norm_region=float(
+                np.mean([r.gradient_norm for r in candidates]) if candidates else 0.0
+            ),
+            **counts,
+            **{f"cumulative_{k}": v for k, v in cumulative.items()},
+            **metrics,
         )
-        if global_steps >= next_eval or global_steps == args.total_timesteps:
-            evaluation = evaluate_policy(eval_env, agent, args.eval_episodes, args.device,
-                                         adapter=eval_adapter)
-            eval_total += evaluation["eval_steps"]
-            row.update(evaluation, cumulative_eval_steps=eval_total,
-                       wall_time=time.monotonic() - start_time)
-            save_checkpoint(out_dir / f"checkpoint_{global_steps}.pt",
-                            agent, optimizer, args, archive, regionizer, global_steps, update)
+        if global_steps >= next_eval:
+            evaluation = evaluate(eval_adapter, agent, args, device, args.eval_episodes)
+            row.update(evaluation)
+            if args.save_model:
+                torch.save(
+                    dict(agent=agent.state_dict(), args=asdict(args), global_steps=global_steps),
+                    out_dir / f"checkpoint_{global_steps}.pt",
+                )
             next_eval += args.eval_interval
 
         for region in candidates:
-            region_logger.log(dict(
-                step=global_steps, env_id=args.env_id, region_id=region.region_id,
-                sigma=region.sigma_ema, p=region.p_ema, alignment=region.p_raw,
-                priority=region.priority, visit_count=region.count,
-                last_seen=region.last_seen_step, last_probed=region.last_probed_step,
-            ))
+            region_logger.log(
+                dict(
+                    step=global_steps,
+                    env_id=args.env_id,
+                    region_id=region.region_id,
+                    sigma=region.sigma_ema,
+                    p=region.p_ema,
+                    alignment=region.p_raw,
+                    priority=region.priority,
+                    visit_count=region.count,
+                    last_seen=region.last_seen_step,
+                    last_probed=region.last_probed_step,
+                )
+            )
         logger.log(row)
         print(json.dumps(row), flush=True)
 
-    (out_dir / "complete.json").write_text(json.dumps(dict(
-        global_env_steps=global_steps, counts=cumulative,
-        wall_time=time.monotonic() - start_time, final_eval=evaluation,
-    ), indent=2))
+    (out_dir / "complete.json").write_text(
+        json.dumps(
+            dict(global_env_steps=global_steps, counts=cumulative, wall_time=time.monotonic() - start_time),
+            indent=2,
+        )
+    )
     for a in (adapter, ref_adapter, eval_adapter):
-        a.close()
+        if a is not None:
+            a.close()
 
 
 if __name__ == "__main__":

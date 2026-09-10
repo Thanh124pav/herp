@@ -1,0 +1,86 @@
+# Build the HERP Docker image on every push and publish it to GHCR
+# (ghcr.io/<owner>/<repo>) — the free registry that ships with every GitHub
+# repo, authed by the workflow's own GITHUB_TOKEN. No secrets to configure.
+#
+# Tags produced:
+#   ghcr.io/<owner>/<repo>:latest     - always the newest push on the default branch
+#   ghcr.io/<owner>/<repo>:main       - branch-named tag
+#   ghcr.io/<owner>/<repo>:<sha>      - immutable per-commit tag
+#   ghcr.io/<owner>/<repo>:pr-<n>     - one tag per open PR (not pushed)
+#
+# The CUDA base is ~2.5 GB; the `docker/build-push-action` GitHub-Actions cache
+# keeps rebuild time under a minute after the first build. `nvidia-smi` and
+# `physx_cuda` aren't available on GitHub-hosted runners, so this workflow
+# only BUILDS the image — it does not exercise CUDA. That is sufficient for
+# distributing a working environment; a GPU host still runs `pytest -q` at
+# `docker run` time.
+
+name: docker
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Free runner disk
+        # The CUDA base image is large; strip preinstalled toolchains we won't
+        # use so the build layer cache has room to breathe.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=ref,event=tag
+            type=sha
+
+      - name: Build (and push on non-PR)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Load the image on PR builds so a follow-up `docker run` step could
+          # smoke it; on push, `push: true` handles distribution instead.
+          load: ${{ github.event_name == 'pull_request' }}

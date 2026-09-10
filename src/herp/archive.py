@@ -1,8 +1,14 @@
+"""Region archive with per-slot batched snapshots (IMPLEMENTATION.md §4.7).
+
+The archive is process-local; snapshots are held per-region and sampled by the
+probe scheduler. ``add(env_ids, snapshots, region_ids)`` accepts the batched
+output of an adapter's ``save_state``.
+"""
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
-from copy import deepcopy
 
 import torch
 
@@ -14,8 +20,8 @@ class Snapshot:
     env_state: Any
     obs: torch.Tensor
     timestep: int
-    episode_id: int
-    return_so_far: float
+    episode_id: int = 0
+    return_so_far: float = 0.0
     elapsed_steps: int = 0
 
 
@@ -37,7 +43,7 @@ class Region:
 
 
 class RegionArchive:
-    """Stores regions and bounded per-region state snapshots."""
+    """Regions + bounded per-region state snapshots."""
 
     def __init__(self, max_snapshots_per_region: int = 8, seed: int = 0):
         self.max_snapshots_per_region = int(max_snapshots_per_region)
@@ -63,7 +69,6 @@ class RegionArchive:
 
     def add_snapshot(self, region_id: int, snapshot: Snapshot) -> None:
         region = self.regions[region_id]
-        snapshot = deepcopy(snapshot)
         region.count += 1
         region.snapshot_count += 1
         region.last_seen_step = int(snapshot.timestep)
@@ -75,6 +80,27 @@ class RegionArchive:
         draw = torch.randint(region.snapshot_count, (1,), generator=self._generator).item()
         if draw < self.max_snapshots_per_region:
             region.snapshots[draw] = snapshot
+
+    def add(
+        self,
+        env_ids: torch.Tensor,
+        snapshots: list,
+        region_ids: list[int],
+        obs: torch.Tensor,
+        step: int,
+    ) -> None:
+        """Batched add: ``snapshots[i]`` belongs to slot ``env_ids[i]`` in region ``region_ids[i]``."""
+        env_ids = torch.as_tensor(env_ids, dtype=torch.long).tolist()
+        for env_idx, snap, rid in zip(env_ids, snapshots, region_ids):
+            packaged = Snapshot(
+                env_state=snap,
+                obs=obs[env_idx].detach().cpu().clone(),
+                timestep=int(step),
+                episode_id=0,
+                return_so_far=0.0,
+                elapsed_steps=getattr(snap, "elapsed_steps", 0),
+            )
+            self.add_snapshot(int(rid), packaged)
 
     def sample_snapshot(self, region: Region) -> Snapshot:
         if not region.snapshots:
@@ -94,7 +120,7 @@ class RegionArchive:
         selected: dict[int, Region] = {}
         n_recent = max(1, max_candidates // 2)
         for rid in reversed(recent_region_ids or []):
-            if 0 <= rid < len(self.regions):
+            if 0 <= rid < len(self.regions) and self.regions[rid].snapshots:
                 selected[rid] = self.regions[rid]
             if len(selected) >= max_candidates:
                 return list(selected.values())
@@ -102,7 +128,11 @@ class RegionArchive:
                 break
 
         n_stale = max(1, int(round(max_candidates * stale_fraction)))
-        stale = sorted(self.regions, key=lambda r: (step - r.last_probed_step), reverse=True)
+        stale = sorted(
+            [r for r in self.regions if r.snapshots],
+            key=lambda r: (step - r.last_probed_step),
+            reverse=True,
+        )
         for region in stale[:n_stale]:
             selected.setdefault(region.region_id, region)
             if len(selected) >= max_candidates:
@@ -110,7 +140,9 @@ class RegionArchive:
 
         order = torch.randperm(len(self.regions), generator=self._generator).tolist()
         for rid in order:
-            selected.setdefault(rid, self.regions[rid])
+            r = self.regions[rid]
+            if r.snapshots:
+                selected.setdefault(rid, r)
             if len(selected) >= max_candidates:
                 break
         return list(selected.values())

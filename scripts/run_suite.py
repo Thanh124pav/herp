@@ -34,9 +34,12 @@ def parse():
     p.add_argument("--steps", type=int, default=1_000_000)
     p.add_argument("--eval-interval", type=int, default=50_000)
     p.add_argument("--eval-episodes", type=int, default=50)
-    p.add_argument("--workers", type=int, default=2)
-    p.add_argument("--device", default="cpu")
-    p.add_argument("--sim-backend", default="physx_cpu")
+    p.add_argument("--workers", type=int, default=1)
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--sim-backend", default=None,
+                   help="Override sim backend; default is per-benchmark (§4.16).")
+    p.add_argument("--num-envs", type=int, default=None,
+                   help="Override vector-env count; default is per-benchmark (§4.16).")
     p.add_argument("--extra", nargs=argparse.REMAINDER, default=[],
                    help="Extra flags forwarded to train.py verbatim.")
     p.add_argument("--output-dir", default="outputs/herp_suite")
@@ -63,6 +66,13 @@ def main():
                     for seed in opt.seeds:
                         yield benchmark, task, method, seed
 
+    # §4.16 per-benchmark defaults
+    defaults = {
+        "maniskill": dict(num_envs=1024, sim_backend="physx_cuda"),
+        "metaworld": dict(num_envs=8, sim_backend="cpu"),
+        "fetch": dict(num_envs=8, sim_backend="cpu"),
+    }
+
     def run(benchmark, task, method, seed):
         cell = root / benchmark / f"{task}_{method}_s{seed}"
         cell.mkdir(parents=True, exist_ok=True)
@@ -70,12 +80,16 @@ def main():
         if completed:
             return dict(benchmark=benchmark, task=task, method=method, seed=seed,
                         status="already_complete")
+        d = defaults.get(benchmark, {})
+        num_envs = opt.num_envs or d.get("num_envs", 1)
+        sim_backend = opt.sim_backend or d.get("sim_backend", "physx_cpu")
         command = [
             sys.executable, "train.py",
             "--benchmark", benchmark, "--env-id", task, "--method", method, "--seed", str(seed),
             "--total-timesteps", str(opt.steps), "--eval-interval", str(opt.eval_interval),
             "--eval-episodes", str(opt.eval_episodes), "--device", opt.device,
-            "--sim-backend", opt.sim_backend, "--output-dir", str(cell),
+            "--sim-backend", sim_backend, "--num-envs", str(num_envs),
+            "--output-dir", str(cell),
             *opt.extra,
         ]
         with (cell / "console.log").open("w") as log:
