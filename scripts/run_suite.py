@@ -77,7 +77,11 @@ def parse():
     p.add_argument("--eval-interval", type=int, default=250_000)
     p.add_argument("--eval-episodes", type=int, default=100)
     p.add_argument("--workers", type=int, default=1,
-                   help="Parallel cells. Keep at 1 for GPU-bound ManiSkill runs.")
+                   help="Parallel cells. ManiSkill state-obs GPU sim uses only "
+                        "~4GB/cell, so 3 cells fit a 16GB card (~2.1x aggregate "
+                        "throughput, ~12GB peak). num_envs stays at the recipe "
+                        "value (1024); parallelism is the efficiency lever, not "
+                        "a bigger num_envs (which would cut PPO updates/budget).")
     p.add_argument("--device", default="cuda")
     p.add_argument("--sim-backend", default=None,
                    help="Override sim backend; default is per-benchmark (§4.16).")
