@@ -67,6 +67,10 @@ def parse():
                    choices=list(ML_TASKS))
     p.add_argument("--tasks", nargs="+", default=None,
                    help="Explicit task list; overrides benchmark defaults.")
+    p.add_argument("--exclude-tasks", nargs="*", default=[],
+                   help="Task IDs to skip (applied after per-benchmark expansion). "
+                        "E.g. run the matrix without PegInsertionSide-v1 when that "
+                        "task is being handled by a separate staged runner.")
     p.add_argument("--methods", nargs="+",
                    default=["ppo", "rnd", "disagreement", "herp_sigma", "herp_p", "herp"])
     p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
@@ -183,6 +187,7 @@ def main():
         for seed in opt.seeds:
             for benchmark in opt.benchmarks:
                 tasks = opt.tasks or ML_TASKS[benchmark]
+                tasks = [t for t in tasks if t not in opt.exclude_tasks]
                 for task in tasks:
                     for method in opt.methods:
                         yield seed, benchmark, task, method
