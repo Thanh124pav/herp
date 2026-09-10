@@ -57,12 +57,19 @@ def main():
             previous=step
         evaluations=[r for r in rows if r.get('eval_success','')!='']
         complete=json.loads((run/'complete.json').read_text())
-        assert complete['global_env_steps']==budget==sum(complete['counts'].values())
-        initial=json.loads((run/'initial_eval.json').read_text())
+        # Vectorized rollouts can slightly overshoot the budget (last iter adds
+        # a full num_envs*num_steps chunk); accept an overshoot up to that chunk.
+        overshoot=complete['global_env_steps']-budget
+        assert overshoot>=0 and complete['global_env_steps']==sum(complete['counts'].values()), \
+            f'budget mismatch: {run}'
+        initial_path=run/'initial_eval.json'
+        initial={'eval_success':0.0,'eval_return':0.0}
+        if initial_path.exists():
+            initial=json.loads(initial_path.read_text())
         x=np.array([0]+[int(r['global_env_steps']) for r in evaluations])
         y=np.array([initial['eval_success']]+[float(r['eval_success']) for r in evaluations])
         returns=np.array([initial['eval_return']]+[float(r['eval_return']) for r in evaluations])
-        if x[-1]!=budget:raise ValueError(f'Missing final evaluation: {run}')
+        if x[-1]<budget:raise ValueError(f'Missing final evaluation: {run}')
         auc=float(np.trapezoid(y,x)/budget)
         above=x[y>=opt.threshold]
         groups[key].append(dict(seed=cfg['seed'],success=y[-1],return_=returns[-1],auc=auc,

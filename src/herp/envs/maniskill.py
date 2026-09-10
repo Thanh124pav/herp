@@ -77,10 +77,12 @@ class ManiSkillAdapter(EnvAdapter):
         env_id: str,
         control_mode: str = "pd_joint_delta_pos",
         obs_mode: str = "state",
-        reward_mode: str = "dense",
+        reward_mode: str = "normalized_dense",
         sim_backend: str = "physx_cuda",
         render_backend: str = "gpu",
         device: str | torch.device = "cuda",
+        reconfiguration_freq: int | None = None,
+        ignore_terminations: bool = False,
         **_,
     ):
         self.env_id = env_id
@@ -90,6 +92,8 @@ class ManiSkillAdapter(EnvAdapter):
         self.sim_backend = sim_backend
         self.render_backend = render_backend
         self.device = torch.device(device)
+        self.reconfiguration_freq = reconfiguration_freq
+        self.ignore_terminations = ignore_terminations
         self.env = None
         self._counter = None  # per-env step counter (num_envs,)
 
@@ -105,18 +109,28 @@ class ManiSkillAdapter(EnvAdapter):
         from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper
         from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
+        # Match upstream ManiSkill ppo.py env construction — the physx_cuda
+        # backend appears to behave slightly differently when render_mode
+        # is None vs "rgb_array" (renderer init path), so mirror the recipe
+        # exactly to avoid divergence from the upstream baseline.
+        render_mode = "rgb_array" if self.sim_backend == "physx_cuda" else None
         env = gym.make(
             self.env_id,
             num_envs=num_envs,
             obs_mode=self.obs_mode,
             reward_mode=self.reward_mode,
             control_mode=self.control_mode,
-            render_mode=None,
+            render_mode=render_mode,
             sim_backend=self.sim_backend,
+            reconfiguration_freq=self.reconfiguration_freq,
         )
         if isinstance(env.action_space, gym.spaces.Dict):
             env = FlattenActionSpaceWrapper(env)
-        self.env = ManiSkillVectorEnv(env, num_envs, ignore_terminations=False, record_metrics=True)
+        self.env = ManiSkillVectorEnv(
+            env, num_envs,
+            ignore_terminations=self.ignore_terminations,
+            record_metrics=True,
+        )
         self.num_envs = num_envs
         self.obs_dim = int(np.prod(self.env.single_observation_space.shape))
         self.action_dim = int(np.prod(self.env.single_action_space.shape))
@@ -132,13 +146,23 @@ class ManiSkillAdapter(EnvAdapter):
     # ------------------------------------------------------------------ stepping
 
     def reset(self, seed: int | None = None):
-        obs, info = self.env.reset(seed=seed if seed is not None else self._seed)
+        # When the caller omits ``seed``, use the env's own advancing RNG (no
+        # fixed seed) rather than replaying ``self._seed`` — the old behaviour
+        # made every eval reset land on the SAME task setup, so success stayed
+        # 0 in eval even when training was solving the task.
+        if seed is None:
+            obs, info = self.env.reset()
+        else:
+            obs, info = self.env.reset(seed=seed)
         self._counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         return obs.to(self.device), info
 
     def step(self, actions: torch.Tensor):
-        actions = actions.to(self.env.action_space.low.device if hasattr(self.env.action_space, "low") else self.device)
-        obs, reward, terminated, truncated, info = self.env.step(actions)
+        # ManiSkillVectorEnv on ``physx_cuda`` expects GPU tensors. The old
+        # code inferred device from ``env.action_space.low`` which is a numpy
+        # array (device="cpu"), silently moving every action to the CPU on
+        # every step — that broke value-function convergence during long runs.
+        obs, reward, terminated, truncated, info = self.env.step(actions.to(self.device))
         self._counter = self._counter + 1
         # reset the counter for slots that just ended an episode
         done_mask = torch.as_tensor(terminated, device=self.device) | torch.as_tensor(
