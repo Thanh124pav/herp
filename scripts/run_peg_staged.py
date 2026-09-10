@@ -46,6 +46,11 @@ def parse():
     p.add_argument("--plateau-eps", type=float, default=0.02,
                    help="Stop when best eval_success gains less than this vs the "
                         "previous stage.")
+    p.add_argument("--min-success-for-plateau", type=float, default=0.05,
+                   help="Only treat a low gain as a plateau once best eval_success "
+                        "has climbed above this floor. While the run is still stuck "
+                        "below it (e.g. a hard task with delayed take-off), keep "
+                        "escalating the budget to the cap instead of concluding.")
     p.add_argument("--solved", type=float, default=0.95,
                    help="Stop early once best eval_success reaches this.")
     p.add_argument("--output-dir", default="outputs/peg_staged")
@@ -97,33 +102,52 @@ def main():
     for i, budget in enumerate(stages):
         stage_dir = root / f"stage_{budget}"
         stage_dir.mkdir(parents=True, exist_ok=True)
-        resume_args = ["--resume-from", str(prev_ckpt)] if prev_ckpt else []
-        command = [
-            sys.executable, "train.py",
-            "--benchmark", opt.benchmark, "--env-id", opt.env_id,
-            "--method", opt.method, "--seed", str(opt.seed),
-            "--total-timesteps", str(budget),
-            "--num-envs", str(opt.num_envs), "--sim-backend", opt.sim_backend,
-            "--device", opt.device,
-            "--eval-interval", str(opt.eval_interval),
-            "--eval-episodes", str(opt.eval_episodes),
-            "--output-dir", str(stage_dir),
-            "--wandb-mode", opt.wandb_mode, "--wandb-project", opt.wandb_project,
-            "--wandb-group", opt.wandb_group,
-            "--wandb-tags", opt.wandb_tags,
-            *resume_args,
-        ]
-        print(json.dumps(dict(event="stage_start", stage=i, budget=budget,
-                              resumed_from=str(prev_ckpt) if prev_ckpt else None)),
-              flush=True)
-        with (stage_dir / "console.log").open("a") as log:
-            result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
-        if result.returncode != 0:
-            print(json.dumps(dict(event="stage_failed", stage=i, budget=budget,
-                                  returncode=result.returncode)), flush=True)
-            raise SystemExit(1)
+        marker = stage_dir / "stage_complete.json"
+        own_ckpt = latest_checkpoint(stage_dir)
 
-        best = best_eval_success(stage_dir)
+        if marker.exists() and own_ckpt is not None:
+            # Finished in a previous driver run; re-evaluate without re-training
+            # so restart resumes at the right point and applies stop conditions.
+            best = best_eval_success(stage_dir)
+            prev_ckpt = own_ckpt
+            print(json.dumps(dict(event="stage_skip", stage=i, budget=budget,
+                                  best_eval_success=best)), flush=True)
+        else:
+            # Resume own partial checkpoint if present, else the previous stage's.
+            resume_from = own_ckpt or prev_ckpt
+            resume_args = ["--resume-from", str(resume_from)] if resume_from else []
+            command = [
+                sys.executable, "train.py",
+                "--benchmark", opt.benchmark, "--env-id", opt.env_id,
+                "--method", opt.method, "--seed", str(opt.seed),
+                "--total-timesteps", str(budget),
+                "--num-envs", str(opt.num_envs), "--sim-backend", opt.sim_backend,
+                "--device", opt.device,
+                "--eval-interval", str(opt.eval_interval),
+                "--eval-episodes", str(opt.eval_episodes),
+                "--output-dir", str(stage_dir),
+                "--wandb-mode", opt.wandb_mode, "--wandb-project", opt.wandb_project,
+                "--wandb-group", opt.wandb_group,
+                "--wandb-tags", opt.wandb_tags,
+                *resume_args,
+            ]
+            print(json.dumps(dict(event="stage_start", stage=i, budget=budget,
+                                  resumed_from=str(resume_from) if resume_from else None)),
+                  flush=True)
+            with (stage_dir / "console.log").open("a") as log:
+                result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+            if result.returncode != 0:
+                print(json.dumps(dict(event="stage_failed", stage=i, budget=budget,
+                                      returncode=result.returncode)), flush=True)
+                raise SystemExit(1)
+            ckpt = latest_checkpoint(stage_dir)
+            if ckpt is None:
+                print(json.dumps(dict(event="no_checkpoint", stage=i)), flush=True)
+                raise SystemExit(1)
+            prev_ckpt = ckpt
+            best = best_eval_success(stage_dir)
+            marker.write_text(json.dumps(dict(budget=budget, best_eval_success=best)))
+
         gain = None if (best is None or prev_best is None) else best - prev_best
         rec = dict(event="stage_done", stage=i, budget=budget,
                    best_eval_success=best, gain_vs_prev=gain)
@@ -131,21 +155,18 @@ def main():
         print(json.dumps(rec), flush=True)
         (root / "staged_summary.json").write_text(json.dumps(history, indent=2))
 
-        ckpt = latest_checkpoint(stage_dir)
-        if ckpt is None:
-            print(json.dumps(dict(event="no_checkpoint", stage=i)), flush=True)
-            raise SystemExit(1)
-        prev_ckpt = ckpt
-
         # Stop conditions.
         if best is not None and best >= opt.solved:
             print(json.dumps(dict(event="stop", reason="solved", budget=budget,
                                   best_eval_success=best)), flush=True)
             break
-        if gain is not None and gain < opt.plateau_eps:
+        # Only conclude "plateau" once the run has actually learned above the floor;
+        # while still stuck low, keep escalating (delayed take-off on hard tasks).
+        if (gain is not None and gain < opt.plateau_eps
+                and best is not None and best >= opt.min_success_for_plateau):
             print(json.dumps(dict(event="stop", reason="plateau", budget=budget,
-                                  gain_vs_prev=gain, plateau_eps=opt.plateau_eps)),
-                  flush=True)
+                                  gain_vs_prev=gain, plateau_eps=opt.plateau_eps,
+                                  best_eval_success=best)), flush=True)
             break
         prev_best = best if best is not None else prev_best
     else:
