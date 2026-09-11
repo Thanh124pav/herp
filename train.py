@@ -921,8 +921,15 @@ def main():
             cumulative[key] += counts[key]
         global_steps = sum(cumulative.values())
         update += 1
-        assert global_steps <= args.total_timesteps + args.num_envs * args.num_steps, (
-            f"budget breach: {global_steps} > {args.total_timesteps}"
+        # The loop starts an iteration whenever global_steps < total_timesteps, so
+        # the overshoot is bounded by ONE full iteration's steps — which for HERP
+        # includes the reference batch (num_envs_ref) + probe + allocated steps on
+        # top of the main rollout. With small num_envs (Meta-World/Fetch, num_envs=8)
+        # the fixed-size reference dominates and far exceeds num_envs*num_steps, so
+        # slack must be this iteration's actual step count, not num_envs*num_steps.
+        iter_steps = sum(counts.values())
+        assert global_steps <= args.total_timesteps + iter_steps, (
+            f"budget breach: {global_steps} > {args.total_timesteps} (+{iter_steps} iter)"
         )
 
         # ---------------- eval ----------------
