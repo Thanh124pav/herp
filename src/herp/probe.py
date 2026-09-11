@@ -80,7 +80,7 @@ def probe_rollout(
             action = dist.mean + dist.stddev * first_action_noise.to(device) * probe_scale
         else:
             action = dist.sample()
-        action = action.clamp(adapter.action_low(), adapter.action_high())
+        action = action.clamp(adapter.action_low().to(action.device), adapter.action_high().to(action.device))
         obs, _rew, _term, _trunc, _info = adapter.step(action)
         feats.append(obs.detach().cpu())
         steps += n

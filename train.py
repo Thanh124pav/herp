@@ -351,7 +351,7 @@ def evaluate(adapter, agent, args, device, episodes: int) -> dict:
     max_steps = max(50, adapter.max_episode_steps) * int(episode_windows)
     while len(ep_returns) < episodes and steps < max_steps:
         action = agent.act(obs.to(device), deterministic=True)
-        action = action.clamp(adapter.action_low(), adapter.action_high())
+        action = action.clamp(adapter.action_low().to(device), adapter.action_high().to(device))
         obs, reward, term, trunc, info = adapter.step(action)
         reward = reward.to(device).float()
         per_slot_return = per_slot_return + reward
@@ -694,8 +694,8 @@ def main():
         # (verified end-to-end via mini_train_direct.py → success=1.0 on
         # PushCube-v1 in 800k steps). Keep the HERP-specific accounting
         # (counts, mode_buf) but do not rearrange this block.
-        action_low = adapter.action_low()
-        action_high = adapter.action_high()
+        action_low = adapter.action_low().to(device)
+        action_high = adapter.action_high().to(device)
         for step in range(args.num_steps):
             obs_buf[step] = obs
             done_buf[step] = next_done.float()

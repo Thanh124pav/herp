@@ -40,7 +40,7 @@ def collect_reference(
     for t in range(horizon):
         with torch.no_grad():
             action, _logp, _ent, value = agent.get_action_and_value(obs.to(device), deterministic=True)
-        applied = action.clamp(adapter.action_low(), adapter.action_high())
+        applied = action.clamp(adapter.action_low().to(action.device), adapter.action_high().to(action.device))
         next_obs, reward, term, trunc, _info = adapter.step(applied)
         obs_buf.append(obs.detach().cpu())
         act_buf.append(action.detach().cpu())
