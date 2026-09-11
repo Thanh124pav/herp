@@ -343,7 +343,8 @@ def evaluate(adapter, agent, args, device, episodes: int) -> dict:
     """
     obs, _ = adapter.reset()
     ep_returns: list[float] = []
-    ep_successes: list[float] = []
+    ep_successes: list[float] = []        # success_once: reached success at ANY step
+    ep_successes_final: list[float] = []  # success_at_end: success at the terminal step
     per_slot_return = torch.zeros(adapter.num_envs, device=device)
     per_slot_success = torch.zeros(adapter.num_envs, device=device)
     steps = 0
@@ -355,15 +356,24 @@ def evaluate(adapter, agent, args, device, episodes: int) -> dict:
         obs, reward, term, trunc, info = adapter.step(action)
         reward = reward.to(device).float()
         per_slot_return = per_slot_return + reward
-        per_slot_success = torch.maximum(
-            per_slot_success, adapter.success_from_info(info).float().to(device)
-        )
+        cur_success = adapter.success_from_info(info).float().to(device)
+        per_slot_success = torch.maximum(per_slot_success, cur_success)
         done = (term.to(device) | trunc.to(device))
         if done.any():
+            # On truncation/termination the vec env auto-resets, so info["success"]
+            # already reflects the NEW episode (=~0). The finished episode's true
+            # terminal state is in info["final_info"]; use it for success_at_end,
+            # and fold it into success_once so a success holding only on the last
+            # step is not missed.
+            fi = info.get("final_info") if isinstance(info, dict) else None
+            end_success = (adapter.success_from_info(fi).float().to(device)
+                           if fi is not None else cur_success)
             done_ids = torch.where(done)[0].tolist()
             for i in done_ids:
                 ep_returns.append(float(per_slot_return[i].item()))
-                ep_successes.append(float(per_slot_success[i].item()))
+                ep_successes.append(max(float(per_slot_success[i].item()),
+                                        float(end_success[i].item())))
+                ep_successes_final.append(float(end_success[i].item()))
                 per_slot_return[i] = 0.0
                 per_slot_success[i] = 0.0
         steps += 1
@@ -371,10 +381,11 @@ def evaluate(adapter, agent, args, device, episodes: int) -> dict:
     # configured episode count so methods with the same protocol stay comparable.
     ep_returns = ep_returns[:episodes]
     ep_successes = ep_successes[:episodes]
+    ep_successes_final = ep_successes_final[:episodes]
     return dict(
         eval_return=float(np.mean(ep_returns)) if ep_returns else 0.0,
         eval_success=float(np.mean(ep_successes)) if ep_successes else 0.0,
-        eval_success_final=float(np.mean(ep_successes)) if ep_successes else 0.0,
+        eval_success_final=float(np.mean(ep_successes_final)) if ep_successes_final else 0.0,
         eval_steps=steps * adapter.num_envs,
         eval_episodes=len(ep_returns),
     )
