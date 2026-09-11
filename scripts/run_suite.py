@@ -47,7 +47,7 @@ ML_TASKS = {
 # §7 per-benchmark / per-task defaults.
 DEFAULT_STEPS_PER_BENCHMARK = {
     "maniskill": 5_000_000,
-    "metaworld": 2_000_000,
+    "metaworld": 1_000_000,
     "fetch": 1_000_000,
 }
 DEFAULT_STEPS_PER_TASK = {
