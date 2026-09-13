@@ -26,12 +26,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # --- System packages (IMPLEMENTATION.md §2.2) -------------------------------
 # Notes on the Python install:
-#   * Ubuntu 22.04 ships Python 3.10; we install 3.12 from the deadsnakes PPA.
-#   * We do NOT install the distro `python3-pip` — that ships pip only for the
-#     system 3.10 interpreter and colliding with our 3.12 caused CI build
-#     failures with "No module named pip" after symlinking `python` -> 3.12.
-#     Instead we bootstrap pip inside the 3.12 interpreter via `ensurepip`
-#     (which is provided by `python3.12-venv`).
+#   * Ubuntu 22.04 ships Python 3.10; we install 3.11 AND 3.12 from deadsnakes.
+#     3.12 is the main HERP interpreter; 3.11 is only used for the BRO baseline
+#     whose JAX pins want a slightly older Python — see docker/requirements-bro.txt.
+#   * We do NOT install the distro `python3-pip` — colliding pips between 3.10
+#     and 3.12 broke earlier builds. `ensurepip` from the -venv package
+#     bootstraps pip inside each interpreter cleanly.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential git curl unzip ca-certificates \
         software-properties-common gnupg \
@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libvulkan1 mesa-vulkan-drivers \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-venv python3.11-dev \
         python3.12 python3.12-venv python3.12-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -67,6 +68,25 @@ RUN python -m pip install -r requirements.txt
 COPY . .
 RUN python -m pip install -e .
 
+# --- Third-party baselines + isolated venvs --------------------------------
+# Clones RFCL / ActiveRL / BRO / MaxInfoRL at the SHAs pinned in
+# docs/v3/external_baselines.lock.json, plus a sparse checkout of the
+# ManiSkill upstream examples/baselines tree (needed by
+# scripts/tdmpc2_official.py). Cached in the image so container starts are
+# offline-friendly. Comment out this block if you only need the main HERP
+# path and want a smaller image (~4 GB smaller without the venvs below).
+RUN chmod +x scripts/fetch_third_party.sh scripts/setup_secondary_venvs.sh \
+             scripts/server_deploy.sh scripts/server_run.sh scripts/server_setup.sh \
+ && ./scripts/fetch_third_party.sh
+
+# Create isolated venvs for TD-MPC2 (py3.12), MaxInfoRL (py3.12), BRO (py3.11).
+# These are large (~5 GB total) and slow to install (10-20 min per venv). Skip
+# any you don't need by passing SKIP=... into the build via --build-arg:
+#     docker build --build-arg SKIP_VENVS="bro maxinforl" -t herp:cu128 .
+ARG SKIP_VENVS=""
+ENV SKIP="${SKIP_VENVS}"
+RUN ./scripts/setup_secondary_venvs.sh
+
 # --- Optional runtime knobs -----------------------------------------------
 # Determinism (§8.3) — cudnn deterministic + no benchmark. The training scripts
 # also set torch.manual_seed / np seeds; these env vars help third-party wheels.
@@ -74,6 +94,11 @@ ENV CUBLAS_WORKSPACE_CONFIG=:4096:8 \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1
 
-# Non-interactive default: run pytest -q as a smoke on ``docker run``.
-# Override with an explicit command to launch a real training run.
-CMD ["python", "-m", "pytest", "-q", "tests/", "-k", "not maniskill and not pickcube"]
+# Non-interactive default: run the full framework pipeline via server_deploy.sh.
+# Override for smoke tests or single stages via `docker run ... <cmd>`.
+# Example single-stage run:
+#     docker run --gpus all -v $HOME/.sapien:/root/.sapien \
+#                -v $(pwd)/outputs:/workspace/herp/outputs \
+#                -v $HOME/.netrc:/root/.netrc:ro \
+#                -e STAGE=phase1 herp:cu128
+CMD ["./scripts/server_deploy.sh"]

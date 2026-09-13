@@ -58,4 +58,16 @@ if torch.cuda.is_available():
 if [[ -z "${WANDB_API_KEY:-}" ]]; then
     echo "[server_setup] optional: run 'wandb login' for online logging, or export WANDB_API_KEY"
 fi
-echo "[server_setup] done. Launch: ./scripts/server_run.sh"
+
+# --- Third-party baselines --------------------------------------------------
+# Only run these if the user hasn't opted out; they add ~10-30 min of first-run
+# setup for the external SAC/MBRL baselines (BRO, MaxInfoRL, TD-MPC2 upstream).
+if [[ "${SKIP_THIRD_PARTY:-0}" == "0" ]]; then
+    echo "[server_setup] fetching third_party locked baselines"
+    ./scripts/fetch_third_party.sh
+fi
+if [[ "${SKIP_SECONDARY_VENVS:-0}" == "0" ]]; then
+    echo "[server_setup] setting up secondary venvs (tdmpc2/maxinforl/bro)"
+    ./scripts/setup_secondary_venvs.sh
+fi
+echo "[server_setup] done. Launch: ./scripts/server_deploy.sh"
