@@ -1130,4 +1130,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--legacy-v2" in sys.argv:
+        sys.argv.remove("--legacy-v2")
+        main()
+    else:
+        from scripts.train_v3 import main as main_v3
+        main_v3()

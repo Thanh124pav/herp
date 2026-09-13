@@ -40,6 +40,22 @@ class Region:
     priority: float = 0.0
     gradient_norm: float = 0.0
     snapshot_count: int = 0
+    is_root: bool = False
+    num_chains: int = 0
+    num_entries: int = 0
+    mean_chain_len: float = 0.
+    mean_policy_change: float = 0.
+    mean_action_entropy: float = 0.
+    mean_state_change: float = 0.
+    q_direct: float = float("nan")
+    q_pred: float = 0.
+    q_combined: float = 0.
+    sigma_sample_count: int = 0
+    allocated_fragments: int = 0
+    last_scored_step: int = 0
+    td_error_ema: float = 0.
+    value_change: float = 0.
+    previous_value: float | None = None
 
 
 class RegionArchive:
@@ -50,6 +66,13 @@ class RegionArchive:
         self.regions: list[Region] = []
         self._generator = torch.Generator()
         self._generator.manual_seed(seed)
+
+    def ensure_root(self):
+        if not self.regions:
+            self.regions.append(Region(0, torch.empty(0), is_root=True))
+        if not self.regions[0].is_root:
+            raise ValueError("Cannot reinterpret a legacy archive as v3")
+        return self.regions[0]
 
     def __len__(self) -> int:
         return len(self.regions)

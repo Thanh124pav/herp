@@ -35,6 +35,7 @@ class ManiSkillSnapshot:
     state_dict: Any
     elapsed_steps: int
     return_so_far: float = 0.0
+    observation_info: Any = None
 
 
 def _detach_clone(x):
@@ -96,6 +97,7 @@ class ManiSkillAdapter(EnvAdapter):
         self.ignore_terminations = ignore_terminations
         self.env = None
         self._counter = None  # per-env step counter (num_envs,)
+        self._observation_info = None
 
     def make(self, num_envs: int = 1, seed: int = 0, **_) -> "ManiSkillAdapter":
         if self.env is not None:
@@ -156,7 +158,16 @@ class ManiSkillAdapter(EnvAdapter):
         else:
             obs, info = self.env.reset(seed=seed)
         self._counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._observation_info = _detach_clone(self.env.unwrapped.get_info())
         return obs.to(self.device), info
+
+    def reset_indices(self, env_ids: torch.Tensor):
+        """Ordinary resets of selected slots; preserve the other slot clocks."""
+        ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        obs, info = self.env.reset(options={"env_idx": ids})
+        self._counter[ids] = 0
+        self._observation_info = _detach_clone(self.env.unwrapped.get_info())
+        return obs.to(self.device).float(), info
 
     def step(self, actions: torch.Tensor):
         # ManiSkillVectorEnv on ``physx_cuda`` expects GPU tensors. The old
@@ -171,6 +182,7 @@ class ManiSkillAdapter(EnvAdapter):
         )
         if done_mask.any():
             self._counter = torch.where(done_mask, torch.zeros_like(self._counter), self._counter)
+        self._observation_info = _detach_clone(self.env.unwrapped.get_info())
         return (
             obs.to(self.device).float(),
             torch.as_tensor(reward, device=self.device).float(),
@@ -185,7 +197,8 @@ class ManiSkillAdapter(EnvAdapter):
         env_ids = torch.as_tensor(env_ids, dtype=torch.long, device="cpu")
         base = self.env.unwrapped
         # ManiSkill 3: get_state_dict() returns a batched nested dict for all slots.
-        sd = base.get_state_dict()
+        sd = _detach_clone(base.get_state_dict())
+        observation_info = self._observation_info if self._observation_info is not None else _detach_clone(base.get_info())
         elapsed = self._counter.detach().cpu().tolist()
         out = []
         for idx in env_ids.tolist():
@@ -193,6 +206,7 @@ class ManiSkillAdapter(EnvAdapter):
                 ManiSkillSnapshot(
                     state_dict=_slice_state_dict(sd, idx),
                     elapsed_steps=int(elapsed[idx]),
+                    observation_info=_slice_state_dict(observation_info, idx),
                 )
             )
         return out
@@ -206,8 +220,10 @@ class ManiSkillAdapter(EnvAdapter):
         for i, snap in zip(env_ids.tolist(), snapshots):
             _scatter_state_dict(full, snap.state_dict, i, self.device)
         base.set_state_dict(full)
-        # Recompute observations from restored state.
-        obs = base.get_obs()
+        # ManiSkill 3.0.1 set_state_dict restores scene tensors but does not
+        # apply the controller dictionary returned by get_state_dict.
+        if "controller" in full:
+            base.agent.set_controller_state(full["controller"])
         # Restore elapsed clocks (best-effort — some ManiSkill wrappers own this).
         for i, snap in zip(env_ids.tolist(), snapshots):
             self._counter[i] = int(snap.elapsed_steps)
@@ -216,6 +232,16 @@ class ManiSkillAdapter(EnvAdapter):
                     base._elapsed_steps[i] = int(snap.elapsed_steps)
                 except Exception:
                     pass
+        # Contact-derived observation bits (e.g. is_grasped) describe the
+        # preceding physics step. set_state_dict cannot reconstruct its contact
+        # cache without stepping. Preserve this observation memory in snapshots;
+        # the next real action updates physics contacts normally and is counted.
+        restored_info = base.get_info()
+        for i, snap in zip(env_ids.tolist(), snapshots):
+            if getattr(snap, "observation_info", None) is not None:
+                _scatter_state_dict(restored_info, snap.observation_info, i, self.device)
+        obs = base.get_obs(info=restored_info)
+        self._observation_info = _detach_clone(restored_info)
         obs_t = obs.to(self.device).float() if torch.is_tensor(obs) else torch.as_tensor(obs, device=self.device).float()
         return obs_t[env_ids.to(obs_t.device)]
 

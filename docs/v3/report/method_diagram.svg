@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="572.4pt" height="125.28pt" viewBox="0 0 572.4 125.28" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:date>2026-09-13T10:47:17.912715</dc:date>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.10.7, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 125.28 
+L 572.4 125.28 
+L 572.4 0 
+L 0 0 
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 12.78 83.7072 
+L 104.85 83.7072 
+Q 109.314 83.7072 109.314 79.272 
+L 109.314 34.92 
+Q 109.314 30.4848 104.85 30.4848 
+L 12.78 30.4848 
+Q 8.316 30.4848 8.316 34.92 
+L 8.316 79.272 
+Q 8.316 83.7072 12.78 83.7072 
+z
+" clip-path="url(#p871cbf741f)" style="fill: #eaf4f3; stroke: #126b73; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 124.38 83.7072 
+L 216.45 83.7072 
+Q 220.914 83.7072 220.914 79.272 
+L 220.914 34.92 
+Q 220.914 30.4848 216.45 30.4848 
+L 124.38 30.4848 
+Q 119.916 30.4848 119.916 34.92 
+L 119.916 79.272 
+Q 119.916 83.7072 124.38 83.7072 
+z
+" clip-path="url(#p871cbf741f)" style="fill: #eaf4f3; stroke: #126b73; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 235.98 83.7072 
+L 328.05 83.7072 
+Q 332.514 83.7072 332.514 79.272 
+L 332.514 34.92 
+Q 332.514 30.4848 328.05 30.4848 
+L 235.98 30.4848 
+Q 231.516 30.4848 231.516 34.92 
+L 231.516 79.272 
+Q 231.516 83.7072 235.98 83.7072 
+z
+" clip-path="url(#p871cbf741f)" style="fill: #eaf4f3; stroke: #126b73; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 347.58 83.7072 
+L 439.65 83.7072 
+Q 444.114 83.7072 444.114 79.272 
+L 444.114 34.92 
+Q 444.114 30.4848 439.65 30.4848 
+L 347.58 30.4848 
+Q 343.116 30.4848 343.116 34.92 
+L 343.116 79.272 
+Q 343.116 83.7072 347.58 83.7072 
+z
+" clip-path="url(#p871cbf741f)" style="fill: #eaf4f3; stroke: #126b73; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 459.18 83.7072 
+L 551.25 83.7072 
+Q 555.714 83.7072 555.714 79.272 
+L 555.714 34.92 
+Q 555.714 30.4848 551.25 30.4848 
+L 459.18 30.4848 
+Q 454.716 30.4848 454.716 34.92 
+L 454.716 79.272 
+Q 454.716 83.7072 459.18 83.7072 
+z
+" clip-path="url(#p871cbf741f)" style="fill: #eaf4f3; stroke: #126b73; stroke-linejoin: miter"/>
+   </g>
+   <g id="text_1">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle" x="58.815" y="59.579437" transform="rotate(-0 58.815 59.579437)">Online trajectories</text>
+   </g>
+   <g id="patch_7">
+    <path d="M 110.752049 57.096 
+Q 113.775925 57.096 115.681767 57.096 
+" style="fill: none; stroke: #126b73; stroke-linecap: round"/>
+    <path d="M 112.081767 55.296 
+L 115.681767 57.096 
+L 112.081767 58.896 
+" style="fill: none; stroke: #126b73; stroke-linecap: round"/>
+   </g>
+   <g id="text_2">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle" x="170.415" y="59.579437" transform="rotate(-0 170.415 59.579437)">Policy-KL chains</text>
+   </g>
+   <g id="patch_8">
+    <path d="M 222.352049 57.096 
+Q 225.375925 57.096 227.281767 57.096 
+" style="fill: none; stroke: #126b73; stroke-linecap: round"/>
+    <path d="M 223.681767 55.296 
+L 227.281767 57.096 
+L 223.681767 58.896 
+" style="fill: none; stroke: #126b73; stroke-linecap: round"/>
+   </g>
+   <g id="text_3">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(251.535937 54.540422)">Entry-context</text>
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(265.440937 64.618453)">regions</text>
+   </g>
+   <g id="patch_9">
+    <path d="M 333.952049 57.096 
+Q 336.975925 57.096 338.881767 57.096 
+" style="fill: none; stroke: #126b73; stroke-linecap: round"/>
+    <path d="M 335.281767 55.296 
+L 338.881767 57.096 
+L 335.281767 58.896 
+" style="fill: none; stroke: #126b73; stroke-linecap: round"/>
+   </g>
+   <g id="text_4">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(365.185547 54.540422)">Relevance ×</text>
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(370.488516 64.618453)">dispersion</text>
+   </g>
+   <g id="patch_10">
+    <path d="M 445.552049 57.096 
+Q 448.575925 57.096 450.481767 57.096 
+" style="fill: none; stroke: #126b73; stroke-linecap: round"/>
+    <path d="M 446.881767 55.296 
+L 450.481767 57.096 
+L 446.881767 58.896 
+" style="fill: none; stroke: #126b73; stroke-linecap: round"/>
+   </g>
+   <g id="text_5">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle" x="505.215" y="59.579437" transform="rotate(-0 505.215 59.579437)">Acquire → PPO</text>
+   </g>
+   <g id="text_6">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle; fill: #444444" x="286.2" y="106.992" transform="rotate(-0 286.2 106.992)">Root resets and restored chain entries share a counted acquisition budget</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p871cbf741f">
+   <rect x="7.2" y="7.2" width="558" height="110.88"/>
+  </clipPath>
+ </defs>
+</svg>

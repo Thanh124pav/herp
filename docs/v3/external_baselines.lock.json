@@ -1,0 +1,34 @@
+[
+  {
+    "name": "RFCL",
+    "url": "https://github.com/StoneT2000/rfcl",
+    "path": "third_party/rfcl",
+    "commit": "7bd660f05dbda1ec8881bcfb250a8d1881532dbb",
+    "setting": "Demonstrations; native SAC/JAX; ManiSkill overlap",
+    "status": "downloaded; not yet executed"
+  },
+  {
+    "name": "Active RL",
+    "url": "https://github.com/sml-iisc/ActiveRL",
+    "path": "third_party/ActiveRL",
+    "commit": "cb367f31da874b50388faa930af09587d3a93887",
+    "setting": "Offline dataset plus online acquisition; MuJoCo overlap",
+    "status": "downloaded; not yet executed"
+  },
+  {
+    "name": "BRO",
+    "url": "https://github.com/naumix/BiggerRegularizedOptimistic",
+    "path": "third_party/BRO",
+    "commit": "5870a13d4bf4f66eeddfc291a59df6d2009de600",
+    "setting": "Native off-policy JAX; continuous-control overlap",
+    "status": "downloaded; not yet executed"
+  },
+  {
+    "name": "MaxInfoRL",
+    "url": "https://github.com/sukhijab/maxinforl_torch",
+    "path": "third_party/MaxInfoRL",
+    "commit": "8da195780d1de6d2100598ce8aa62c1ded9ae19c",
+    "setting": "Native off-policy PyTorch; continuous-control overlap",
+    "status": "downloaded; not yet executed"
+  }
+]

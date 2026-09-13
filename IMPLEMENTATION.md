@@ -1,790 +1,2154 @@
-# HERP IMPLEMENTATION.md — Claude-CLI operating manual
+# HERP v3 — IMPLEMENTATION.md
 
-> **Audience.** This file is a *prompt* for a Claude CLI session that will
-> refactor and validate HERP on a GPU-capable server. Read it top-to-bottom
-> **before** running any command or writing any code. All theory (definitions
-> of `σ_v`, `p_v`, allocation rule, why HERP works) lives in `THEORY.md`;
-> this file contains only instructions and code-shape contracts.
->
-> **Model expectation.** Claude Opus 4.7 or Fable 5 (or newer). The refactor
-> in §4 is ~1500–2500 lines of edits plus tests and must be done inside a
-> single conversation on the server so the write-run-fix loop is tight.
->
-> **You must not deviate from the file layout, adapter signatures, or test
-> gates below without asking the user first.** External code
-> (`docs/HERP_PILOT_V2_RESULTS.md`, `scripts/*.py`) references section
-> numbers here; **keep the § numbering stable** even if you edit body text.
+> **Purpose:** coding specification for refactoring the current HERP repository to the HERP v3 theory in `THEORY.md`.  
+> **Repository:** `Thanh124pav/herp`  
+> **Target:** ICRA 2027 experiments.  
+> **Priority:** mechanism correctness before scale.
 
 ---
 
-## §0. Session opening checklist
+# 0. What changes in v3
 
-Before writing any code, do all of this:
+The repository already contains PPO infrastructure, restorable snapshots, a region archive, gradient signatures, relevance scoring, sigma probing, and a budget allocator.
 
-1. `git status` — confirm the tree is clean. If not, stash or ask the user.
-2. `git log --oneline -5` — you should be on `main` at or newer than
-   `877ac9e` (`Merge pull request #4 …`).
-3. `nvidia-smi` — confirm the target GPU is visible and idle. See §2.1 for
-   accepted GPUs.
-4. Read the three sibling docs once each: `THEORY.md` (math),
-   `PLAN.md` (population-routing baselines, unrelated to HERP core but
-   shares repo), and `README.md` (project pitch).
-5. Read this file end-to-end, including the appendix.
-6. Run the verification block in §2.8 and paste the output back into the
-   session before starting §4. If any check fails, fix the environment
-   before touching source.
+HERP v3 changes the conceptual core:
 
-Do **not** start editing on your own initiative before those six steps.
+1. replace state-radius regions with **trajectory-chain regions**;
+2. replace discounted compressed future features with a **fixed-\(M\) direct future-dispersion estimator**;
+3. add a simple **linear variance predictor** \(f\);
+4. reserve `region_id=0` for the **root / initial-state distribution**;
+5. remove hard-coded `uniform_mix`, `staleness_mix`, and permanent `n_min` from the main method;
+6. keep gradient cosine alignment as the default \(p_v\);
+7. allocate with exactly
 
----
+   \[
+   n_v\propto p_v\sigma_v.
+   \]
 
-## §1. Starting state (as of 2026-09-10, commit `877ac9e`)
-
-Working:
-
-- `train.py` — single-env PPO training loop with HERP hooks (probing,
-  region signatures, allocator). Uses `sim_backend=physx_cpu, num_envs=1`.
-  ~64 steps/sec on an 8-core CPU.
-- `src/herp/envs/maniskill.py` — `ManiSkillAdapter` for the 4 tabletop tasks
-  in §7, single-env only.
-- `src/herp/{allocator,archive,gradient_signature,regions,relevance,rollout_buffer,sigma,probe,eval,logging}.py`
-  — HERP core, single-env semantics.
-- `src/herp/baselines/{rnd,disagreement}.py` — intrinsic-reward baselines.
-- `scripts/run_suite.py` — restartable (benchmark, task, method, seed) grid,
-  each cell subprocess-invokes `train.py`.
-- `scripts/ppo_official.py` — a patched copy of the upstream ManiSkill PPO
-  baseline. Runs standalone; not yet integrated as the HERP backbone.
-- `tests/test_herp_core.py`, `test_herp_regressions.py`,
-  `test_checkpoint_qmp.py`, `test_vocabulary.py` — pass on single-env CPU.
-
-Stubbed / broken:
-
-- `src/herp/envs/metaworld.py` — every method raises `NotImplementedError`.
-- `src/herp/envs/fetch.py` — every method raises `NotImplementedError`.
-- Vectorized GPU sim: `physx_cuda` cannot be used on this repo yet because
-  `train.py` assumes `num_envs=1`. The upstream ManiSkill vectorized env
-  API (`num_envs=1024, sim_backend=physx_cuda`) is what the refactor in §4
-  targets.
-- The `experience_routing/` package is a separate SAC-based population
-  pipeline (PLAN.md); it is **out of scope for this refactor**. Do not
-  edit anything under `src/experience_routing/`.
-
-Recent evidence:
-
-- `docs/HERP_PILOT_V2_RESULTS.md` — 32k-step pilot, all methods still at
-  ≈0% success. The σ mechanism test correlates 0.63±. The p mechanism test
-  inverted sign under the single-step SGD proxy; the fix is the controlled
-  PPO-delta protocol in §4.13.
-- `docs/PPO_OFFICIAL_50K.md` — official PPO CPU-single-env at 50k steps
-  also 0% success. The result is not an algorithm bug; it is a
-  throughput bug. GPU sim is the fix.
+HERP remains an acquisition layer over PPO. Do not rewrite the PPO optimizer.
 
 ---
 
-## §2. Environment setup on a GPU server
+# 1. Target module layout
 
-### §2.1 Hardware requirements
+Use this layout.
 
-- **GPU (required).** NVIDIA GPU with compute capability ≥ 7.0
-  (Volta / Turing / Ampere / Ada / Blackwell). Recommended:
-  RTX 3090 / 4090 / 5090 / A10 / A100 / H100. **≥ 12 GB VRAM** for
-  `num_envs=1024`; **≥ 24 GB** for `num_envs=4096`. Consumer 4 GB cards
-  (e.g. GTX 1650) do not run PhysX 5.3 GPU sim reliably — do not attempt.
-- **Driver.** NVIDIA driver ≥ 550, CUDA runtime 12.1 or newer.
-- **CPU / RAM.** ≥ 8 cores, ≥ 16 GB. WSL2 works but native Linux is
-  preferred for GPU sim.
-- **Disk.** ≥ 20 GB free for the checkpoint & video suite.
+```text
+src/herp/
+    archive.py
+    allocator.py
+    chain_features.py        # NEW
+    chain_partition.py       # NEW
+    region_graph.py          # NEW
+    sigma.py                 # REWRITE main path
+    sigma_predictor.py       # NEW
+    acquisition.py           # NEW
+    relevance.py
+    gradient_signature.py
+    rollout_buffer.py
+    logging.py
+    envs/
+        base.py
+        maniskill.py
+        metaworld.py
+        fetch.py
 
-### §2.2 System packages (Ubuntu 22.04 baseline)
+analysis/
+    mechanisms.py
+    partition_diagnostics.py # NEW
+    sigma_diagnostics.py     # NEW
 
-```bash
-sudo apt-get update && sudo apt-get install -y \
-    build-essential git curl unzip \
-    libglib2.0-0 libxext6 libsm6 libxrender1 \
-    libglfw3 libglew-dev libglvnd-dev \
-    libvulkan1 mesa-vulkan-drivers
+tests/
+    test_chain_partition.py  # NEW
+    test_sigma_v3.py         # NEW
+    test_sigma_predictor.py  # NEW
+    test_root_region.py      # NEW
+    test_allocator_v3.py     # NEW
 ```
 
-### §2.3 Python environment (choose one)
-
-**Option A — conda (recommended, matches dev setup):**
-
-```bash
-curl -fsSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o /tmp/mc.sh
-bash /tmp/mc.sh -b -p "$HOME/miniconda3"
-source "$HOME/miniconda3/etc/profile.d/conda.sh"
-conda create -n herp python=3.12 -y
-conda activate herp
-```
-
-**Option B — uv / venv:**
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-```
-
-### §2.4 Install PyTorch with CUDA
-
-```bash
-pip install --extra-index-url https://download.pytorch.org/whl/cu128 \
-    torch==2.11.0+cu128
-```
-
-Adjust `cu128` to your CUDA runtime (`cu121`, `cu124`, …) if needed. Verify:
-
-```bash
-python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-```
-
-### §2.5 Install project dependencies
-
-```bash
-pip install -r requirements.txt
-pip install -e .
-```
-
-`requirements.txt` pins ManiSkill 3.0.1, Meta-World 3.1.1, gymnasium-robotics
-1.5.0, mujoco 3.3.0. See that file for the full list.
-
-### §2.6 Post-install downloads
-
-ManiSkill needs SAPIEN's PhysX GPU binary and asset packs the first time
-it starts a GPU sim:
-
-```bash
-python -c "
-import mani_skill.envs, gymnasium as gym
-env = gym.make('PickCube-v1', num_envs=4, sim_backend='physx_cuda',
-               obs_mode='state', render_mode=None)
-env.reset(); env.close()
-print('ManiSkill GPU init OK')
-"
-```
-
-That command:
-
-- downloads `~/.sapien/physx/…` (PhysX 5.3 GPU library, ~200 MB, one-time),
-- warms up asset caches,
-- proves that `physx_cuda` initialises on this box.
-
-If it prints `RuntimeError: CUDA failed` or a `PhysxGpuSystem` error, stop.
-The GPU is not compatible; go to §2.9 fallback.
-
-Meta-World assets are shipped with the wheel; no download.
-
-Gymnasium-Robotics Fetch uses MuJoCo native meshes; no download.
-
-### §2.7 Verify Meta-World and Fetch
-
-```bash
-python -c "
-import gymnasium as gym
-import metaworld
-mt1 = metaworld.MT1('reach-v3', seed=0)
-env = mt1.train_classes['reach-v3']()
-env.set_task(mt1.train_tasks[0])
-o, _ = env.reset()
-print('Meta-World reach-v3 OK, obs', o.shape)
-env.close()
-"
-
-python -c "
-import gymnasium as gym, gymnasium_robotics  # noqa: F401
-env = gym.make('FetchPush-v4')
-o, _ = env.reset()
-print('Fetch OK, keys', list(o.keys()))
-env.close()
-"
-```
-
-### §2.8 Full green-light block
-
-Paste this exact block into your session before starting the refactor.
-All four lines must print `OK`.
-
-```bash
-python -c "import torch; assert torch.cuda.is_available(); print('torch cuda OK')"
-python -c "
-import mani_skill.envs, gymnasium as gym
-env = gym.make('PickCube-v1', num_envs=8, sim_backend='physx_cuda',
-               obs_mode='state', render_mode=None)
-env.reset(); env.close()
-print('mani_skill GPU sim OK')
-"
-python -c "
-import metaworld
-mt1 = metaworld.MT1('reach-v3', seed=0)
-env = mt1.train_classes['reach-v3']()
-env.set_task(mt1.train_tasks[0]); env.reset()
-print('metaworld OK')
-"
-python -c "
-import gymnasium as gym, gymnasium_robotics  # noqa: F401
-env = gym.make('FetchPush-v4'); env.reset()
-print('fetch OK')
-"
-```
-
-### §2.9 Fallback: GPU sim unavailable
-
-If §2.6 or §2.8 second line fails despite following §2.1–§2.5:
-
-1. Ask the user before touching the refactor. GPU sim is a hard
-   prerequisite for §4; without it the refactor cannot be
-   integration-tested.
-2. If the user still wants you to proceed, restrict scope to §4.1–§4.4
-   and §4.16 (interfaces + adapters + suite runner) and leave §4.5–§4.15
-   for later. Mark that clearly in the PR description.
+Keep the current state-radius regionizer as a legacy ablation, but the main `herp` method must no longer call it.
 
 ---
 
-## §3. Refactor overview
+# 2. Global configuration
 
-**Goal.** Move HERP from single-env CPU sim (`num_envs=1, physx_cpu`) to
-vectorized GPU sim (`num_envs≥1024, physx_cuda`) on ManiSkill, while
-keeping the same HERP hooks (probes, region signatures, allocator) and
-without regressing the σ-mechanism-test correlation reported in
-`docs/HERP_PILOT_V2_RESULTS.md`.
-
-**Non-goals.**
-
-- Do **not** change `experience_routing/` (the SAC/UOT pipeline for PLAN.md).
-- Do **not** rewrite the PPO algorithm inside `train.py` from scratch; port
-  the official ManiSkill PPO backbone as the *inner* loop (§4.14).
-- Do **not** batch Meta-World or Fetch; those adapters stay single-env but
-  must fit the same interface (§4.1).
-
-**Deliverables.**
-
-1. Batched `EnvAdapter` interface (§4.1).
-2. `ManiSkillAdapter` batched (§4.2).
-3. `MetaWorldAdapter`, `FetchAdapter` implemented, single-env, same
-   interface (§4.3, §4.4).
-4. `train.py` rewritten around vectorized rollout + per-env-slot HERP
-   modes (§4.5) with strict budget accounting (§4.6).
-5. Region archive + probes work per-env-slot (§4.7, §4.8).
-6. Reference batch collection batched (§4.9).
-7. Gradient signature batched (§4.10).
-8. All `p_v` estimators batched (§4.11).
-9. σ mechanism test unchanged behaviourally on ManiSkill; new K=4 vs K=64
-   correlation figure at 500k + 5M checkpoints (§4.12).
-10. Controlled PPO-delta mechanism test (§4.13) — this fixes the sign flip
-    reported in the v2 pilot.
-11. PPO backbone matches upstream ManiSkill `ppo.py` in Agent architecture,
-    init, and hyperparams (§4.14). RND / Disagreement re-baselined against
-    the same backbone (§4.15).
-12. Suite runner supports vectorized cells (§4.16).
-13. Tests pass (§5). Snapshot restore is ≤ 1e-7 obs error per env slot on
-    ManiSkill, ≤ 1e-6 on Meta-World and Fetch (§5.2).
-14. Pilot v3 report at `docs/HERP_PILOT_V3_RESULTS.md` (§6) showing that
-    HERP does not regress the σ-mechanism correlation and that PPO now
-    solves PickCube-v1 well inside the 5M budget.
-
-**Order.** Follow §4 top-to-bottom. Do **not** interleave — the interface
-in §4.1 is a hard boundary that every later section depends on.
-
----
-
-## §4. Refactor tasks
-
-### §4.1 Batched `EnvAdapter` interface
-
-File: `src/herp/envs/base.py`. Rewrite so every method is batched. Keep
-the class name `EnvAdapter`; keep `benchmark: str` class attribute.
-
-Required methods (all torch-tensor first; no numpy in the public API):
+Create one v3 config dataclass.
 
 ```python
-class EnvAdapter:
-    benchmark: str
-    num_envs: int
-    obs_dim: int
-    action_dim: int
-    max_episode_steps: int
+@dataclass
+class HERPV3Config:
+    # fixed future context
+    future_horizon: int = 32
 
-    def make(self, num_envs: int, seed: int, **kwargs) -> "EnvAdapter": ...
-    # Batched reset — returns obs of shape (num_envs, obs_dim) and a per-env info dict.
-    def reset(self, seed: int | None = None) -> tuple[torch.Tensor, dict]: ...
-    # Batched step. Actions and returns are torch tensors on self.device.
-    def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
-        # returns obs, reward, terminated, truncated, info
-        ...
-    # Snapshot API — save/restore a SUBSET of env slots.
-    # env_ids is a LongTensor of slot indices (0..num_envs-1); return one
-    # Snapshot per id.
-    def save_state(self, env_ids: torch.Tensor) -> list[Snapshot]: ...
-    def restore_state(self, env_ids: torch.Tensor, snapshots: list[Snapshot]) -> torch.Tensor:
-        # returns the obs of the restored slots, shape (len(env_ids), obs_dim)
-        ...
-    # Feature extraction used by regionizer.
-    def obs_tensor(self, raw_obs) -> torch.Tensor:
-        # Called by the rollout loop; kept for parity with pre-refactor code.
-        ...
-    def region_features(self, obs: torch.Tensor) -> torch.Tensor:
-        # Slice/transform obs → region-feature vector. Default: identity.
-        ...
-    def elapsed_steps(self) -> torch.Tensor:  # shape (num_envs,)
-        ...
-    def success_from_info(self, info) -> torch.Tensor:  # shape (num_envs,), 0/1
-        ...
-    def close(self) -> None: ...
+    # temporal segmentation
+    boundary_percentile: float = 0.90
+    boundary_lambda_policy: float = 1.0
+    boundary_lambda_state: float = 0.0
+    boundary_min_chain_len: int = 2
+    boundary_score_buffer: int = 4096
+
+    # cross-trajectory clustering
+    chain_radius: float = 0.75
+    max_regions: int = 256
+    centroid_tau: float = 0.05
+
+    # trajectory metric
+    action_feature_weight: float = 1.0
+    min_common_steps: int = 8
+
+    # sigma
+    sigma_floor: float = 1e-3
+    sigma_ema_tau: float = 0.9
+    max_sigma_fragments_per_region: int = 32
+    max_sigma_policy_lag: int = 2
+    sigma_predictor_kappa: float = 8.0
+
+    # linear predictor
+    predictor_enabled: bool = True
+    predictor_ridge: float = 1e-3
+    predictor_min_labels: int = 16
+    predictor_refit_every: int = 1
+
+    # relevance
+    relevance_ema_tau: float = 0.9
+    relevance_floor: float = 1e-3
+    relevance_alpha: float = 1.0
+    relevance_mode: str = "cosine"
+
+    # archive
+    max_snapshots_per_region: int = 16
+
+    # warm-up
+    min_non_root_regions: int = 8
+
+    # diagnostics
+    log_root_total_variance: bool = True
 ```
 
-`Snapshot` is a per-benchmark dataclass; keep it opaque outside the
-adapter. It must be `copy.deepcopy`-safe and JSON-serialisable only via
-the benchmark's own helper.
+Do not put the following in the main v3 path:
 
-Single-env benchmarks (Meta-World, Fetch) implement this by holding an
-internal list of `num_envs` MuJoCo envs and looping serially. That is
-OK; the interface is what matters.
+```text
+uniform_mix
+staleness_mix
+permanent n_min
+rank-normalized sigma
+```
 
-**Test gate.** Every adapter must pass `tests/test_env_adapter.py` (new;
-see §5) with `num_envs ∈ {1, 4}` on the tasks listed in §7.
+They can remain available only for legacy ablations.
 
-### §4.2 ManiSkill batched adapter
+---
 
-File: `src/herp/envs/maniskill.py`. Rewrite around
-`ManiSkillVectorEnv` (from
-`mani_skill.vector.wrappers.gymnasium.ManiSkillVectorEnv`), same wrapper the
-upstream `ppo.py` uses.
+# 3. Core data structures
 
-Snapshot: use `env.unwrapped.get_state_dict(env_ids)` — ManiSkill 3
-supports per-slot state dict extraction. Restore via
-`env.unwrapped.set_state_dict(env_ids, dicts)`. Controller state and
-`_elapsed_steps` must round-trip; verify with §5.2.
-
-Control mode default: `pd_joint_delta_pos` (upstream PPO default). Do not
-override to `pd_ee_delta_pose` unless the user asks — the choice affects
-the PPO reference curves.
-
-Obs mode: `state`. Reward mode: `dense`. `render_mode=None` unless the
-suite runner is capturing eval videos.
-
-### §4.3 Meta-World adapter
-
-File: `src/herp/envs/metaworld.py`. Implement against Farama Meta-World
-V3 (`metaworld==3.1.1`). Fall back to V2 only if V3 class is missing.
-
-Tasks (§7):
-
-- `button-press-v3`, `drawer-open-v3`, `pick-place-v3`, `peg-insert-side-v3`
-
-Snapshot (dataclass `MetaWorldSnapshot`):
-
-- `qpos`, `qvel` — numpy arrays from `env.data.qpos.copy()`,
-  `env.data.qvel.copy()`.
-- `mocap_pos`, `mocap_quat` — `env.data.mocap_pos.copy()`, `.mocap_quat.copy()`.
-- `task_state` — `dict` of goal_pos / goal_quat / hand init / obj init
-  (task-specific). Grab it from `env._get_pos_objects()` etc. and from
-  `env._target_pos` when available. If the env exposes
-  `get_env_state()`/`set_env_state()`, use those directly instead.
-- `elapsed_steps` — int, from an internal counter you maintain (Meta-World
-  does not expose one in a stable API).
-
-Restore: `env.data.qpos[:] = snap.qpos`; `env.data.qvel[:] = snap.qvel`;
-mocap likewise; `mujoco.mj_forward(env.model, env.data)`; restore any
-task_state. Verify obs error ≤ 1e-6 with §5.2.
-
-`num_envs > 1` is implemented as a list of independent envs stepped
-serially. Do not attempt subprocess vectorisation.
-
-### §4.4 Fetch adapter
-
-File: `src/herp/envs/fetch.py`. Implement against
-`gymnasium-robotics==1.5.0`.
-
-Tasks (§7):
-
-- `FetchPush-v4`, `FetchPickAndPlace-v4`
-
-Obs is a dict `{observation, achieved_goal, desired_goal}`. Flatten as
-`torch.cat([observation, achieved_goal, desired_goal])` into `obs_dim`.
-
-Snapshot (dataclass `FetchSnapshot`):
-
-- `qpos`, `qvel`, `mocap_pos`, `mocap_quat` — same as Meta-World.
-- `desired_goal` — from `env.goal.copy()`.
-- `elapsed_steps` — your counter.
-
-Restore: same qpos/qvel/mocap procedure, then `env.goal = snap.desired_goal`.
-Regenerate the obs by calling `env._get_obs()`. Verify §5.2.
-
-`success_from_info(info)`: `info["is_success"]` when present; otherwise
-compute `env.compute_reward(obs["achieved_goal"], obs["desired_goal"], info) == 0`
-(dense reward mode). Prefer the `info["is_success"]` flag.
-
-### §4.5 Rollout loop with per-env modes
-
-File: `train.py` main function. Replace the current single-env loop with
-a vectorized loop over the ManiSkillAdapter. Every env slot at every step
-has a **mode**:
-
-- `NORMAL` — ordinary policy rollout, counted against the training budget.
-- `PROBE` — a slot that has just been restored to a region snapshot and is
-  running a short probe (`args.probe_horizon` steps) to sample `σ_v`.
-- `ALLOCATED` — like NORMAL but its transitions carry a routing tag so
-  they are used to update `p_v` via the controlled PPO-delta test (§4.13).
-- `REFERENCE` — slots dedicated to the reference batch used by `p_v`
-  (§4.9).
-
-At each rollout iteration:
-
-1. Choose how many slots each mode gets. Defaults:
-   - 75% NORMAL, 15% PROBE, 10% ALLOCATED (a full ALLOCATED region is
-     redistributed across the ALLOCATED slots according to the allocator).
-   - REFERENCE runs in a separate small `num_envs_ref` vectorized env (~64)
-     rather than stealing slots from the main rollout.
-2. For PROBE slots, sample regions via `allocator.priority_distribution`,
-   pull snapshots from the archive, restore, then step.
-3. Collect all transitions into a single buffer with a `mode` column.
-
-Budget accounting: increment `cumulative_normal_steps`, `cumulative_probe_steps`,
-`cumulative_allocated_steps`, `cumulative_reference_steps` by the number
-of **individual env transitions** in that mode. `sum(cumulative_*)` must
-always equal `global_steps`, which is the total number of env transitions
-consumed (across all slots and both the main and reference envs).
-
-### §4.6 Budget accounting
-
-Assertion at end of every rollout iter:
+## 3.1 Chain
 
 ```python
-assert cumulative_normal + cumulative_probe + cumulative_allocated + cumulative_reference == global_steps
-assert global_steps <= args.total_timesteps
+@dataclass
+class Chain:
+    episode_id: int
+    start_t: int
+    end_t: int
+
+    state_features: torch.Tensor
+    actions: torch.Tensor
+
+    action_mean: torch.Tensor
+    action_logstd: torch.Tensor
+
+    buffer_indices: torch.Tensor
+
+    entry_snapshot: object | None
+    entry_feature: torch.Tensor | None = None
 ```
 
-`global_steps` grows by `num_envs * num_steps + num_envs_ref * num_steps_ref`
-per iter. This is the standard vectorized-env accounting and matches
-upstream ManiSkill PPO.
-
-The pilot v2 doc (§23) said the 32k pilot is not a final benchmark; keep
-that spirit — the smallest useful budget for the *paper* is now 5M for
-PickCube-v1 and 50M–75M for PegInsertionSide-v1, matching the upstream
-recipe in `third_party/ManiSkill/examples/baselines/ppo/baselines.sh`.
-
-### §4.7 Region archive + snapshots per env slot
-
-File: `src/herp/archive.py`. Each `Region` still holds up to
-`args.max_snapshots_per_region` snapshots. Extend to a batched save:
-`archive.add(env_ids, snapshots, region_ids)`. Sampling for probes stays
-per-region.
-
-The archive is process-local; do not shard across GPUs.
-
-### §4.8 Probe scheduling
-
-Once per rollout iter, choose which PROBE slots restore to which region.
-Priority weights come from `allocator.priority_distribution(regions, args)`.
-Sample with replacement; multiple slots may probe the same region in
-parallel. That is desirable when `p_v * σ_v` is concentrated on a few
-regions.
-
-`args.num_probes` is now the *total* PROBE slots per iter, not per region.
-Adjust default to `int(0.15 * num_envs)`.
-
-### §4.9 Reference batch
-
-File: `src/herp/reference.py` (new). Reference envs run their own small
-vectorized ManiSkill env (`num_envs_ref = 64`) that resets every episode
-and is stepped by the *current* policy in deterministic mode. Its
-trajectories feed the `p_v` cosine / dot / fisher / hybrid estimators.
-
-The reference rollout does **not** update policy weights and does **not**
-share buffers with the main rollout.
-
-### §4.10 Gradient signature
-
-File: `src/herp/gradient_signature.py`. Already uses full-actor +
-logstd parameters (v2 refactor). Batched update: compute per-region
-signature by looping over regions in a `torch.no_grad` block with autograd
-for the small policy-gradient sub-graph; the outer batch dimension is
-already handled.
-
-Empirical Fisher diagonal (`empirical_fisher_diagonal`) also stays; the
-input batches are now large enough that FIM approximation quality
-improves.
-
-### §4.11 `p_v` estimators
-
-Files: `src/herp/relevance.py`, `src/herp/gradient_signature.py`. Keep the
-five estimators (`occupancy`, `cosine`, `dot`, `fisher`, `hybrid`).
-Nothing structural changes; only the batch sizes going in are bigger.
-
-### §4.12 σ mechanism test
-
-Compare `K=4` vs `K=64` oracle probe correlations at two checkpoints:
-
-- Early: 500 000 env steps.
-- Converged: 5 000 000 env steps (PickCube) or 50 000 000 (Peg).
-
-Report ρ + bootstrap 95% CI. The pilot v2 baseline was 0.62 ± at 32k;
-we expect ≥ 0.6 at the early checkpoint and ≥ 0.7 at the converged one.
-Write results to `docs/HERP_PILOT_V3_RESULTS.md` (see §6).
-
-### §4.13 Controlled PPO-delta mechanism (`p_v`)
-
-File: `analysis/mechanisms.py`. Replace the single-step SGD proxy with
-the controlled PPO-delta protocol from `THEORY.md`:
-
-1. Clone the current policy → `π_A` and `π_B`.
-2. On `π_A`: apply one full PPO update on a matched *base* batch
-   (uniformly sampled main-rollout transitions).
-3. On `π_B`: apply one full PPO update on `base ∪ region_batch`, where
-   `region_batch` is transitions collected inside the target region only.
-4. Evaluate both on the reference batch → get `J_ref(A)`, `J_ref(B)`.
-5. `Δ_v = J_ref(B) − J_ref(A)`. This is the ground-truth quantity `p_v`
-   is supposed to predict.
-
-Sample size: ≥ 30 regions, ≥ 50 reference episodes per side.
-Report ρ(`p_v`, `Δ_v`) + bootstrap 95% CI.
-
-The old single-step SGD proxy in mechanisms.py **must be removed**, not
-merely disabled. Its sign flip on undertrained policies is documented in
-`docs/HERP_PILOT_V2_RESULTS.md`.
-
-### §4.14 PPO backbone → official style
-
-Import the network architecture and update loop from
-`scripts/ppo_official.py` (a lightly patched copy of upstream
-`ManiSkill/examples/baselines/ppo/ppo.py`). Specifically:
-
-- `Agent`: 3-layer MLP width 256, `Tanh`, **orthogonal init** with the
-  actor head at `std=0.01*sqrt(2)`. Do **not** keep the old Xavier init.
-- Update: clip-vloss, `target_kl=0.1` early-stop, advantage normalisation,
-  linear LR anneal from `args.learning_rate` to 0.
-- Reward scale: `args.reward_scale = 1.0` default.
-- No obs normalization (upstream default; matches pilot).
-
-Keep HERP-specific extensions (buffer with `mode` column, `adv_scale`
-logging, shared advantage scaler across NORMAL / PROBE / ALLOCATED) but
-built on top of the upstream algorithm.
-
-### §4.15 RND and Disagreement
-
-Files: `src/herp/baselines/rnd.py`, `src/herp/baselines/disagreement.py`.
-Re-baseline against the new PPO backbone. Intrinsic reward is added to
-extrinsic reward at the *transition* level, weight `args.intrinsic_coef`.
-RND target dim = 128; Disagreement ensemble size = 5. Update the
-predictor every rollout iter for `args.intrinsic_epochs` epochs.
-
-### §4.16 Suite runner
-
-File: `scripts/run_suite.py`. Extend `--num-envs` and `--sim-backend` CLI.
-Add a per-benchmark default:
-
-- `maniskill` → `num_envs=1024, sim_backend=physx_cuda`
-- `metaworld`, `fetch` → `num_envs=8, sim_backend=cpu` (serial vectorization)
-
-The restart contract (skip a cell if its `complete.json` exists) is
-already correct; do not change it.
+A chain begins at a detected behavioral boundary and ends immediately before the next boundary.
 
 ---
 
-## §5. Testing
+## 3.2 Region
 
-### §5.1 Unit tests to keep
+Extend the current `Region` dataclass.
 
-Do not delete existing tests unless a specific test asserts single-env
-behaviour that no longer applies. Instead, generalise them to
-`num_envs > 1`. The four existing files under `tests/` must all pass
-after the refactor.
+```python
+@dataclass
+class Region:
+    region_id: int
+    centroid: torch.Tensor
+    is_root: bool = False
 
-### §5.2 Snapshot restore precision
+    snapshots: list[Snapshot] = field(default_factory=list)
+    snapshot_count: int = 0
 
-New file: `tests/test_env_adapter.py`. For each benchmark in §7 and each
-of a small set of task IDs (one per benchmark is enough):
+    num_chains: int = 0
+    num_entries: int = 0
+    mean_chain_len: float = 0.0
 
-1. Reset the env.
-2. Step for a random number of steps `k ∈ [0, 20]`.
-3. Snapshot `env_ids = [0, 1, ..., num_envs-1]`.
-4. Step for another `m ∈ [0, 20]` steps.
-5. Restore all env_ids.
-6. Compute `obs_after_restore - obs_before_restore` L∞ norm per env slot.
-   Assert: ≤ 1e-7 for ManiSkill state obs, ≤ 1e-6 for Meta-World and
-   Fetch (MuJoCo has slightly larger tolerance because of float ↔ double
-   round-tripping).
+    mean_policy_change: float = 0.0
+    mean_action_entropy: float = 0.0
+    mean_state_change: float = 0.0
 
-Also assert: `elapsed_steps` after restore equals the step count at
-snapshot time.
+    q_direct: float = float("nan")
+    q_pred: float = 0.0
+    q_combined: float = 0.0
+    sigma_raw: float = 0.0
+    sigma_ema: float = 0.0
+    sigma_sample_count: int = 0
 
-### §5.3 Batched-vs-single-env parity
+    p_raw: float = 0.0
+    p_ema: float = 0.0
 
-New file: `tests/test_batched_parity.py`. Run one PPO rollout iter with
-`num_envs=1` and `num_envs=8` on `PickCube-v1`, same seed, same policy
-init. Assert that:
+    priority: float = 0.0
+    allocated_fragments: int = 0
 
-- The first env slot of the batched run matches the single-env run in
-  observations for at least 200 steps (allow 1e-5 tolerance in reward).
-- The optimizer step, if run on both, produces gradients whose cosine
-  similarity ≥ 0.99.
-
-This is the highest-value regression barrier for the whole refactor.
-
-### §5.4 Test on the smallest possible GPU footprint
-
-For CI or a quick smoke check, use `num_envs=8, sim_backend=physx_cuda`.
-It exercises every code path without needing multi-GB VRAM budgets.
-
----
-
-## §6. Pilot v3 validation
-
-Once §4 and §5 are green, run:
-
-- `scripts/run_suite.py --benchmarks maniskill --tasks PickCube-v1 PushCube-v1 --methods ppo rnd disagreement herp_sigma herp_p herp --seeds 0 1 2 --steps 5_000_000 --eval-interval 250_000 --eval-episodes 100 --workers 1 --device cuda --sim-backend physx_cuda --extra --num-envs 1024`
-
-Wall clock estimate on RTX 4090: ~10 min per PickCube run, ~15 per
-PushCube. 36 runs total → ~5 hours. Expect ≥ 80% success on PickCube for
-all methods at ≥ 3M steps.
-
-Write `docs/HERP_PILOT_V3_RESULTS.md` with the same structure as
-`HERP_PILOT_V2_RESULTS.md` (main table, σ correlation, controlled
-PPO-delta correlation, hyperparam sensitivity).
-
-If any of the following fails, stop and ask the user:
-
-- PPO baseline does not reach ≥ 80% on PickCube-v1 by 5M steps.
-- σ mechanism ρ < 0.5 at either checkpoint.
-- Controlled PPO-delta mechanism ρ is not significantly positive (95% CI
-  crosses 0) for at least one gradient-based `p_v` estimator.
-
----
-
-## §7. Full experiment matrix (target for the paper)
-
-Benchmarks × tasks (final, do not add/remove without asking):
-
-- **ManiSkill**: `PushCube-v1`, `PickCube-v1`, `StackCube-v1`,
-  `PegInsertionSide-v1`.
-- **Meta-World**: `button-press-v3`, `drawer-open-v3`, `pick-place-v3`,
-  `peg-insert-side-v3`.
-- **Fetch**: `FetchPush-v4`, `FetchPickAndPlace-v4`.
-
-Methods (final):
-
-Required: `ppo`, `rnd`, `disagreement`, `herp_sigma`, `herp_p`, `herp`.
-Optional: `go_explore`, `plr` — do not block the paper on these.
-
-Seeds: 0, 1, 2 (three seeds is the paper minimum; five is nicer if
-compute allows).
-
-Budget:
-
-- ManiSkill: 5M for `PushCube-v1`, `PickCube-v1`, `StackCube-v1`; 75M
-  for `PegInsertionSide-v1`.
-- Meta-World: 2M per task.
-- Fetch: 1M per task.
-
-Total: 10 tasks × 6 methods × 3 seeds = **180 runs**. Reduce to 108
-(6 tasks) if compute is tight — see §3 non-goals.
-
----
-
-## §8. Reproducibility
-
-### §8.1 Provenance
-
-Every run writes `provenance.json` next to its `metrics.csv` with:
-
-```json
-{
-  "python": "3.12.3",
-  "torch": "2.11.0+cu128",
-  "numpy": "…",
-  "mani_skill": "3.0.1",
-  "metaworld": "3.1.1",
-  "gymnasium_robotics": "1.5.0",
-  "mujoco": "3.3.0",
-  "git_sha": "…",
-  "git_dirty": false,
-  "seed": 0,
-  "device": "cuda:0",
-  "sim_backend": "physx_cuda",
-  "num_envs": 1024,
-  "total_timesteps": 5000000,
-  "hostname": "…",
-  "started_at": "ISO-8601",
-  "cli": [ "python", "train.py", …]
-}
+    last_seen_step: int = 0
+    last_scored_step: int = 0
 ```
 
-Do not skip any field. `docs/HERP_PILOT_V2_RESULTS.md` §33 was already
-following this contract; keep it.
+Reserve `region_id=0` for root:
 
-### §8.2 Configs
+```python
+root = Region(
+    region_id=0,
+    centroid=torch.empty(0),
+    is_root=True,
+)
+```
 
-Every run must be reproducible from `configs/<benchmark>/<method>.yaml`
-+ CLI overrides. Do not accept CLI-only runs for anything that ends up in
-the paper.
+All learned chain regions start at ID `1`.
 
-### §8.3 Determinism
+---
+
+# 4. State and action normalization
+
+Move the reusable running normalization logic into `chain_features.py`.
+
+```python
+class RunningFeatureNormalizer:
+    def update(self, x: torch.Tensor) -> None:
+        ...
+
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
+        ...
+```
+
+Pipeline:
+
+```python
+z_raw = adapter.region_features(obs)
+state_normalizer.update(z_raw)
+z = state_normalizer.normalize(z_raw)
+```
+
+Maintain a separate action normalizer if action dimensions have different scales.
+
+Never use raw observation scale inside the chain Euclidean metric.
+
+---
+
+# 5. Policy-distribution divergence
+
+For diagonal Gaussian PPO, implement exact KL.
+
+```python
+def diagonal_gaussian_kl(
+    mu_p: torch.Tensor,
+    logstd_p: torch.Tensor,
+    mu_q: torch.Tensor,
+    logstd_q: torch.Tensor,
+) -> torch.Tensor:
+    # return one scalar per leading batch element
+    ...
+```
+
+Then:
+
+```python
+def symmetric_gaussian_kl(...):
+    return 0.5 * (
+        diagonal_gaussian_kl(p, q)
+        + diagonal_gaussian_kl(q, p)
+    )
+```
+
+Use actor distribution parameters directly. Do not estimate distribution change from sampled actions when mean and log-standard-deviation are available.
+
+---
+
+# 6. Boundary detector
+
+Create `chain_partition.py`.
+
+At timestep \(t\):
+
+```python
+policy_change = symmetric_gaussian_kl(
+    mu_prev, logstd_prev,
+    mu_curr, logstd_curr,
+)
+
+state_change = torch.linalg.vector_norm(
+    z_curr - z_prev,
+    dim=-1,
+)
+```
+
+Normalize each scalar channel with running statistics.
+
+```python
+score = (
+    cfg.boundary_lambda_policy * policy_change_norm
+    + cfg.boundary_lambda_state * state_change_norm
+)
+```
+
+Maintain a bounded deque of recent scores and compute
+
+```python
+threshold = torch.quantile(
+    torch.as_tensor(score_buffer),
+    cfg.boundary_percentile,
+)
+```
+
+Boundary condition:
+
+```python
+is_boundary = (
+    score > threshold
+    and current_chain_len >= cfg.boundary_min_chain_len
+)
+```
+
+Episode termination always closes a chain.
+
+If the score buffer is too small to estimate a percentile, do not create an artificial boundary; use episode end only during the short bootstrap phase.
+
+---
+
+# 7. Online chain builder
+
+Maintain one `ChainBuilder` per vectorized env slot.
+
+Pseudo-code:
+
+```python
+for env_id in range(num_envs):
+    builder = builders[env_id]
+
+    if builder.empty:
+        builder.start(current_transition)
+
+    boundary = detector(...)
+
+    if boundary and builder.length >= min_chain_len:
+        finished = builder.close_before_current()
+        process_chain(finished)
+        builder.start_from_current()
+
+    builder.append(current_transition)
+
+    if terminated or truncated:
+        finished = builder.close()
+        process_chain(finished)
+        builder.reset()
+```
+
+The chain builder must retain the restorable snapshot at chain entry.
+
+Do not archive random interior snapshots for the main method.
+
+---
+
+# 8. Chain-entry feature and clustering
+
+For a chain beginning at timestep `i`, define
+
+```python
+entry_feature = torch.cat([
+    z_prev,
+    z_start,
+], dim=-1)
+```
+
+Distance:
+
+```python
+def chain_entry_distance(h1: torch.Tensor, h2: torch.Tensor) -> torch.Tensor:
+    d = h1.numel() // 2
+    return 0.5 * (
+        torch.linalg.vector_norm(h1[:d] - h2[:d])
+        + torch.linalg.vector_norm(h1[d:] - h2[d:])
+    )
+```
+
+Online assignment:
+
+```python
+if no_non_root_regions:
+    create_region()
+else:
+    nearest = argmin_distance(entry_feature, region_centroids)
+
+    if min_dist > cfg.chain_radius and num_regions < cfg.max_regions:
+        create_region()
+    else:
+        assign(nearest)
+```
+
+Centroid update:
+
+```python
+c = (1 - tau) * c + tau * entry_feature
+```
+
+Important: the centroid now lives in **chain-entry context space**, not state space.
+
+---
+
+# 9. Snapshot semantics
+
+When a chain is assigned to region `v`, store its entry snapshot:
+
+```python
+archive.add_snapshot(
+    region_id=v,
+    snapshot=chain.entry_snapshot,
+)
+```
+
+Preserve the existing bounded reservoir sampling behavior.
+
+Main method start position:
+
+```text
+chain entry
+```
+
+Ablations may use:
+
+```text
+random inside chain
+chain end
+```
+
+but those must not be mixed into the main archive.
+
+---
+
+# 10. Region graph
+
+Create `region_graph.py`.
+
+```python
+class RegionGraph:
+    def __init__(self):
+        self.edge_counts: dict[tuple[int, int], int] = {}
+
+    def observe_path(self, region_ids: list[int]) -> None:
+        ...
+
+    def children(self, region_id: int) -> list[int]:
+        ...
+
+    def child_probabilities(self, region_id: int) -> dict[int, float]:
+        ...
+```
+
+For an episode region path:
+
+```text
+0 -> 5 -> 5 -> 12 -> 8
+```
+
+collapse consecutive duplicates to
+
+```text
+0 -> 5 -> 12 -> 8
+```
+
+before updating counts.
+
+---
+
+# 11. Fixed-\(M\) rollout fragment
+
+Create a single acquisition fragment structure.
+
+```python
+@dataclass
+class RolloutFragment:
+    source_region_id: int
+    policy_version: int
+    fragment_id: int
+
+    states: torch.Tensor
+    state_features: torch.Tensor
+    actions: torch.Tensor
+    rewards: torch.Tensor
+    logprobs: torch.Tensor
+    values: torch.Tensor
+
+    terminated: torch.Tensor
+    truncated: torch.Tensor
+    valid_mask: torch.Tensor
+
+    bootstrap_value: torch.Tensor
+    entry_snapshot_id: int | None
+```
+
+Every scheduled fragment aims for exactly
+
+```python
+M = cfg.future_horizon
+```
+
+transitions.
+
+If true environment termination occurs early:
+
+- stop stepping that job;
+- pad only for tensor storage;
+- set `valid_mask=False` for padding;
+- all metrics and PPO loss ignore padded entries.
+
+Artificial HERP horizon truncation at step \(M\) uses critic bootstrap.
+
+---
+
+# 12. Root acquisition
+
+When allocator chooses region `0`:
+
+```python
+obs, info = env.reset(...)
+```
+
+then rollout current policy for up to \(M\) transitions.
+
+Root fragments:
+
+- use `source_region_id=0`;
+- are valid PPO data;
+- update chain partition and region graph;
+- provide direct root-sigma samples;
+- can discover new chain regions.
+
+There is no permanent `n0 >= k` rule.
+
+---
+
+# 13. Non-root acquisition
+
+When allocator chooses region `v > 0`:
+
+1. sample one archived chain-entry snapshot;
+2. restore a vectorized environment slot;
+3. verify restored observation;
+4. follow the current stochastic PPO policy for \(M\) transitions;
+5. tag all transitions with `source_region_id=v`.
+
+Do not force a first-action perturbation in the main method. The current stochastic policy defines the continuation distribution.
+
+Keep explicit first-action perturbation only as a sigma ablation.
+
+---
+
+# 14. Trajectory feature for sigma
+
+Rewrite the main path in `sigma.py`.
+
+For valid step `m`:
+
+```python
+y_m = torch.cat([
+    normalized_state_feature_m,
+    cfg.action_feature_weight * normalized_action_m,
+], dim=-1)
+```
+
+State-only ablation:
+
+```python
+cfg.action_feature_weight = 0.0
+```
+
+---
+
+# 15. Fixed-window pair distance
+
+Implement:
+
+```python
+def fixed_window_distance(
+    x: RolloutFragment,
+    y: RolloutFragment,
+    min_common_steps: int,
+) -> torch.Tensor | None:
+    common = x.valid_mask & y.valid_mask
+
+    if int(common.sum()) < min_common_steps:
+        return None
+
+    dx = x.traj_features[common] - y.traj_features[common]
+    return dx.square().sum(dim=-1).mean()
+```
+
+Default:
+
+```python
+min_common_steps = max(2, cfg.future_horizon // 4)
+```
+
+Log the fraction of excluded fragment pairs.
+
+For the cleanest mechanism experiments, prefer environments/checkpoints where most fragments reach the full \(M\) steps.
+
+---
+
+# 16. Direct \(q_v\) estimator
+
+Implement:
+
+```python
+def direct_q_estimate(
+    fragments: list[RolloutFragment],
+    min_common_steps: int,
+) -> tuple[float, int]:
+    """Estimate q = 0.5 E[d_M(X, X')]."""
+```
+
+If fewer than two usable fragments exist:
+
+```python
+return float("nan"), 0
+```
+
+Do not return zero. Zero means observed deterministic continuation, whereas NaN means insufficient evidence.
+
+For usable unordered pairs:
+
+```python
+pair_dists = []
+
+for i in range(K):
+    for j in range(i + 1, K):
+        d = fixed_window_distance(...)
+        if d is not None:
+            pair_dists.append(d)
+
+if not pair_dists:
+    return float("nan"), 0
+
+q_hat = 0.5 * torch.stack(pair_dists).mean()
+return float(q_hat), len(pair_dists)
+```
+
+For full equal-length fragments, this is the unbiased U-statistic from `THEORY.md`.
+
+---
+
+# 17. Vectorized pairwise sigma
+
+Correctness first. A Python pair loop is acceptable for unit tests and small `K`.
+
+Then optionally vectorize:
+
+```python
+# [K, M, D]
+features = ...
+
+# [K, K, M, D]
+diff = features[:, None, :, :] - features[None, :, :, :]
+
+# [K, K, M]
+d2 = diff.square().sum(dim=-1)
+```
+
+Apply pair-valid masks and upper-triangular selection.
+
+Do not optimize until profiling shows this code matters.
+
+---
+
+# 18. Recent sigma cache
+
+Future dispersion is policy-dependent. Do not accumulate fragments forever.
+
+Maintain:
+
+```python
+region_sigma_fragments: dict[int, deque[RolloutFragment]]
+```
+
+with maximum size:
+
+```python
+cfg.max_sigma_fragments_per_region
+```
+
+Every fragment stores `policy_version`.
+
+Only use fragments satisfying
+
+```python
+current_policy_version - fragment.policy_version <= cfg.max_sigma_policy_lag
+```
+
+for the direct estimator.
+
+Default lag:
+
+```text
+2 PPO updates
+```
+
+---
+
+# 19. Linear variance predictor
+
+Create `sigma_predictor.py`.
+
+No neural network in the main v3 method.
+
+```python
+class LinearVariancePredictor:
+    def __init__(self, feature_dim: int, ridge: float):
+        self.feature_dim = feature_dim
+        self.ridge = ridge
+        self.X = []
+        self.y = []
+        self.weight = []
+        self.coef = None
+
+    def add_label(self, x, q_hat, weight):
+        ...
+
+    def fit(self):
+        ...
+
+    def predict(self, x):
+        ...
+```
+
+Use weighted ridge closed form:
+
+\[
+\hat\omega=(X^\top WX+\lambda I)^{-1}X^\top Wy.
+\]
+
+Implementation:
+
+```python
+A = X.T @ W @ X + ridge * I
+b = X.T @ W @ y
+coef = torch.linalg.solve(A, b)
+```
+
+Use `float64` for the solve.
+
+Do not regularize the intercept:
+
+```python
+I[0, 0] = 0.0
+```
+
+---
+
+# 20. Predictor feature vector
+
+Implement:
+
+```python
+def region_predictor_features(region: Region) -> torch.Tensor:
+    return torch.tensor([
+        1.0,
+        region.mean_policy_change,
+        region.mean_action_entropy,
+        region.mean_state_change,
+        math.log1p(region.num_entries),
+    ], dtype=torch.float64)
+```
+
+Normalize non-intercept features across the predictor dataset.
+
+Do not include:
+
+- chain length;
+- current `q_direct`;
+- current allocator priority;
+- future outcome values not available before acquisition.
+
+---
+
+# 21. Predictor labels
+
+After a region receives fresh allocation, compute a label only from the **fresh fragments generated in that round**.
+
+```python
+fresh = fresh_fragments_by_source[region_id]
+
+if len(fresh) >= 2:
+    q_hat, pair_count = direct_q_estimate(...)
+
+    if math.isfinite(q_hat):
+        predictor.add_label(
+            x=region_predictor_features(region),
+            q_hat=q_hat,
+            weight=float(len(fresh)),
+        )
+```
+
+Do not repeatedly relabel old cached fragments every iteration.
+
+One allocation round produces at most one new predictor label per region.
+
+---
+
+# 22. Predictor initialization
+
+Before `predictor_min_labels` valid labels exist:
+
+```python
+if any_direct_q_exists:
+    q_pred = median_recent_direct_q
+else:
+    q_pred = 0.0
+```
+
+This gives a common prior before the linear model is estimable.
+
+It is not a special allocation rule.
+
+---
+
+# 23. Combine direct and predicted variance
+
+Implement:
+
+```python
+def combined_q(
+    q_direct: float,
+    q_pred: float,
+    direct_sample_count: int,
+    kappa: float,
+) -> float:
+    q_pred = max(0.0, q_pred)
+
+    if not math.isfinite(q_direct):
+        return q_pred
+
+    q_direct = max(0.0, q_direct)
+    lam = direct_sample_count / (direct_sample_count + kappa)
+
+    return lam * q_direct + (1.0 - lam) * q_pred
+```
+
+Then:
+
+```python
+q = combined_q(...)
+sigma_alloc = math.sqrt(
+    max(0.0, q) + cfg.sigma_floor ** 2
+)
+```
+
+Update region fields:
+
+```python
+region.q_direct = q_direct
+region.q_pred = q_pred
+region.q_combined = q
+region.sigma_raw = sigma_alloc
+region.sigma_ema = (
+    tau * region.sigma_ema
+    + (1 - tau) * sigma_alloc
+)
+```
+
+Initialize the first EMA observation directly rather than shrinking from zero.
+
+---
+
+# 24. Root sigma
+
+Root fragments are still stored so that direct root dispersion can be measured, but the **main root sigma used by the allocator is the total-variance aggregation over root child regions**. Direct root sigma is a diagnostic/oracle-like validation signal.
+
+Required per child:
+
+```text
+child probability w_c
+child mean future representation mu_c
+child q_c
+```
+
+Then:
+
+```python
+mu0 = sum(w[c] * mu[c] for c in children)
+
+q0_total = sum(
+    w[c] * (
+        q[c]
+        + torch.sum((mu[c] - mu0) ** 2).item()
+    )
+    for c in children
+)
+```
+
+For each child, use its current combined within-region estimate `q_combined` and a recent empirical mean future representation `mu_c`. If there are no observed children, use empirical root variance `0.0`; the common sigma floor then keeps root alive.
 
 Set:
 
 ```python
-torch.manual_seed(seed)
-np.random.seed(seed)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+root.q_combined = q0_total
+root.sigma_raw = math.sqrt(q0_total + cfg.sigma_floor**2)
 ```
 
-Full bit-exact determinism on GPU sim is not guaranteed by PhysX; note
-that in the provenance's `notes` field if you observe reproducibility
-drift > 1e-3 in eval return across seeds you thought were identical.
+Log in parallel:
+
+```text
+sigma/root_direct          # validation only
+sigma/root_total_variance  # main root score
+sigma/root_abs_gap
+```
 
 ---
 
-## §9. Instructions for the CLI when uncertain
+# 25. Region statistics for predictor
 
-- **Ask the user before**: (a) changing this file's § numbering,
-  (b) editing anything under `src/experience_routing/`,
-  (c) killing a long-running training job,
-  (d) force-pushing or amending an existing commit on `main`,
-  (e) deleting any `outputs/` directory that predates this session.
-- **Just decide** when: (a) picking between two hyperparameters that
-  match the upstream recipe within a factor of 2, (b) renaming a private
-  helper, (c) fixing a lint / type error that the CI would catch anyway.
-- **Never**: bypass `pre-commit` hooks (`--no-verify`), commit files
-  under `outputs/` or `third_party/` or `.venv/` (they are gitignored;
-  keep them gitignored), or hard-code paths that require WSL.
+When assigning a new chain to region `v`, update stable online means for:
 
-If a section of this document contradicts something you observe in the
-code (e.g., a method name changed), assume the code is right in the
-moment but *flag the contradiction to the user before you edit*.
+```python
+region.mean_policy_change
+region.mean_action_entropy
+region.mean_state_change
+region.mean_chain_len
+region.num_entries
+region.num_chains
+```
 
-Save recurring feedback to
-`~/.claude/projects/-<slug>/memory/` per the auto-memory contract.
+For a diagonal Gaussian actor, entropy can be computed analytically.
+
+If PPO uses a global state-independent `logstd`, entropy may contain little information. That is acceptable; the linear coefficient should reveal this.
 
 ---
 
-## Appendix A. Legacy anchor map (pre-refactor → this file)
+# 26. Relevance \(p_v\)
 
-External docs (`docs/HERP_PILOT_V2_RESULTS.md`, `scripts/*.py`) still
-reference the pre-refactor section numbers. Where possible I kept the
-same anchor topic in the same § so old references still resolve:
+Keep `relevance.py` but simplify the main path to cosine gradient alignment.
 
-| Old anchor | Topic | New section |
-|---|---|---|
-| §7 | Gradient signature | §4.10 |
-| §8 | Advantage normalization | §4.14 (inside PPO update) |
-| §10 | `p_v` estimators | §4.11 |
-| §23 | "32k pilot is not a final benchmark" | §4.6 note |
-| §25 | Controlled PPO-delta mechanism | §4.13 |
-| §27 / §28 | Estimator / hyperparameter ablations | §6 pilot v3 report |
-| §29 | Standardised restore tests | §5.2 |
-| §32 | Suite runner | §4.16 |
-| §33 | Provenance | §8.1 |
-| §36 Phase 1 | EnvAdapter | §4.1 |
-| §36 Phase 2 | Batched adapter (this refactor) | §4.2 |
-| §39 | Paper success criteria | §6 pilot-v3 gates |
+Current utility:
 
-New sections have no legacy anchor; they were added by this refactor
-manual.
+```python
+def cosine_relevance(
+    region_gradient: torch.Tensor,
+    reference_gradient: torch.Tensor,
+) -> float:
+    ...
+```
+
+Main tracker update:
+
+```python
+raw = cosine_relevance(g_v, g_ref)
+positive = max(0.0, raw)
+
+region.p_raw = raw
+region.p_ema = (
+    cfg.relevance_ema_tau * region.p_ema
+    + (1 - cfg.relevance_ema_tau) * positive
+)
+
+p_alloc = (
+    region.p_ema + cfg.relevance_floor
+) ** cfg.relevance_alpha
+```
+
+Do not separately normalize `p_alloc` across regions.
+
+The final allocator normalizes `p*sigma`.
 
 ---
 
-*End of IMPLEMENTATION.md. If you are the Claude CLI reading this, the
-next thing you should do is run the §2.8 green-light block and paste
-its output. Do not start §4 before that.*
+# 27. Reference batch
+
+Reference data must come only from ordinary environment resets.
+
+At relevance refresh:
+
+1. reset reference envs normally;
+2. roll out the current policy;
+3. compute GAE using the same conventions as main PPO;
+4. compute actor gradient signature `g_ref`.
+
+Reference interactions count toward the training interaction budget unless the paper explicitly reports them separately.
+
+Do not build `g_ref` from restored HERP states.
+
+---
+
+# 28. Regional gradient signatures
+
+For source region `v`, use transitions whose
+
+```python
+source_region_id == v
+```
+
+and compute
+
+```python
+g_v = gradient_signature(region_batch)
+```
+
+Use the full actor parameter set.
+
+Advantage normalization must be consistent between `g_v` and `g_ref`.
+
+Do not independently zero-center tiny regional batches if that rotates the gradient relative to the PPO update actually performed.
+
+Prefer one shared scoring-round advantage scale.
+
+---
+
+# 29. Root relevance
+
+Root relevance is measured, not hard-coded.
+
+Root transitions have:
+
+```python
+source_region_id = 0
+```
+
+Compute:
+
+```python
+g0 = gradient_signature(root_batch)
+p0_raw = cosine_relevance(g0, g_ref)
+```
+
+Then apply the same EMA and floor as all other regions.
+
+---
+
+# 30. Allocator rewrite
+
+Rewrite the main `allocator.py` path.
+
+Remove from the main score:
+
+```text
+robust rank transform of sigma
+uniform_mix
+staleness_mix
+n_min
+```
+
+Compute:
+
+```python
+p = (
+    max(0.0, region.p_ema)
+    + cfg.relevance_floor
+) ** cfg.relevance_alpha
+
+sigma = max(
+    cfg.sigma_floor,
+    region.sigma_ema,
+)
+
+score = p * sigma
+```
+
+Then:
+
+```python
+scores = torch.tensor([...], dtype=torch.float64)
+
+if not torch.isfinite(scores).all():
+    raise FloatingPointError("non-finite HERP v3 priority")
+
+assert torch.all(scores > 0)
+priority = scores / scores.sum()
+```
+
+Do not code a normal-case fallback:
+
+```python
+if scores.sum() == 0:
+    uniform()
+```
+
+Positive floors make that unnecessary.
+
+---
+
+# 31. Integer allocation
+
+For a round budget `B_round`:
+
+```python
+num_fragments = B_round // cfg.future_horizon
+```
+
+Sample:
+
+```python
+draws = torch.multinomial(
+    priority,
+    num_samples=num_fragments,
+    replacement=True,
+    generator=generator,
+)
+
+counts = torch.bincount(
+    draws,
+    minlength=len(active_regions),
+)
+```
+
+Return:
+
+```python
+{
+    region.region_id: int(counts[i])
+    for i, region in enumerate(active_regions)
+}
+```
+
+A largest-remainder deterministic allocator may be used for mechanism tests.
+
+---
+
+# 32. Acquisition scheduler
+
+Create `acquisition.py`.
+
+```python
+@dataclass
+class AcquisitionJob:
+    region_id: int
+    snapshot: Snapshot | None
+    max_steps: int
+```
+
+```python
+class AcquisitionScheduler:
+    def schedule(
+        self,
+        regions: list[Region],
+        allocation: dict[int, int],
+        num_envs: int,
+    ) -> list[AcquisitionJob]:
+        ...
+```
+
+Root job:
+
+```python
+AcquisitionJob(
+    region_id=0,
+    snapshot=None,
+    max_steps=M,
+)
+```
+
+Non-root job samples one region snapshot.
+
+Fill vectorized slots, execute, then continue scheduling until all fragment counts are exhausted.
+
+---
+
+# 33. Rollout buffer metadata
+
+Add:
+
+```python
+source_region_id: torch.Tensor
+chain_region_id: torch.Tensor
+acquisition_round: torch.Tensor
+fragment_id: torch.Tensor
+fragment_step: torch.Tensor
+is_restored_start: torch.Tensor
+```
+
+Definitions:
+
+- `source_region_id`: region where this \(M\)-step fragment started;
+- `chain_region_id`: behavior-chain region currently assigned to this transition.
+
+Do not conflate them.
+
+`p_v` groups by `source_region_id`.
+
+Partition and region graph use `chain_region_id` / chain sequence.
+
+---
+
+# 34. PPO GAE across fragment boundaries
+
+GAE must not leak across independent restored fragments.
+
+For each fragment:
+
+```python
+if true_termination:
+    next_nonterminal = 0.0
+    next_value = 0.0
+else:
+    next_nonterminal = 1.0
+    next_value = critic(last_obs)
+```
+
+Run reverse-time GAE only inside the fragment.
+
+Afterwards concatenate all valid fragment transitions into ordinary PPO minibatches.
+
+Artificial truncation at HERP step \(M\) is bootstrapped.
+
+---
+
+# 35. Policy versioning
+
+Increment:
+
+```python
+policy_version += 1
+```
+
+after each PPO update.
+
+Each rollout fragment stores the version that generated it.
+
+Direct sigma uses only recent policy versions.
+
+The predictor may retain older labels, but log label age. A later ablation can apply exponential age weighting.
+
+---
+
+# 36. Warm-up
+
+HERP cannot score regions before any regions exist.
+
+Use a data-availability warm-up:
+
+```python
+while (
+    num_non_root_regions < cfg.min_non_root_regions
+    or num_sigma_labels < cfg.predictor_min_labels
+):
+    allocate_root_only()
+```
+
+This is not a permanent root lower bound. It only instantiates the objects required by the method.
+
+Log:
+
+```text
+herp_activation_step
+```
+
+---
+
+# 37. Main training-round ordering
+
+Use this ordering to avoid label/policy mismatch.
+
+```text
+policy version k
+    ↓
+score current regions using version-k evidence
+    ↓
+allocate
+    ↓
+collect version-k fresh fragments
+    ↓
+partition + archive + build fresh sigma labels
+    ↓
+PPO update
+    ↓
+policy version k+1
+```
+
+The fresh fragments generated by version \(k\) become labels for future scoring.
+
+Do not recompute a label from trajectories that were not generated by the policy version being analyzed.
+
+---
+
+# 38. End-to-end pseudo-code
+
+```python
+def train_herp_v3(...):
+    init_ppo()
+    init_root_region()
+    init_chain_partition()
+    init_region_graph()
+    init_sigma_predictor()
+
+    # ---- warm-up ----
+    while not data_ready():
+        fragments = acquire_root_fragments(...)
+        process_partition(fragments)
+        add_fresh_sigma_labels(fragments)
+        ppo_update(fragments)
+        policy_version += 1
+
+    # ---- HERP rounds ----
+    while global_train_steps < total_timesteps:
+
+        # A. reference objective
+        reference = collect_reference_batch()
+        g_ref = gradient_signature(reference)
+
+        # B. score active regions
+        for region in active_regions:
+            region.p_raw = score_relevance(region, g_ref)
+            update_relevance_ema(region)
+
+            if not region.is_root:
+                q_direct, n_direct = estimate_recent_q(region)
+
+                x = region_predictor_features(region)
+                q_pred = predictor.predict_or_prior(x)
+
+                q = combined_q(
+                    q_direct=q_direct,
+                    q_pred=q_pred,
+                    direct_sample_count=n_direct,
+                    kappa=cfg.sigma_predictor_kappa,
+                )
+
+                sigma = math.sqrt(
+                    max(0.0, q) + cfg.sigma_floor**2
+                )
+
+                update_region_sigma_fields(region, q_direct, q_pred, q, sigma)
+
+        # root sigma is recursively induced by child regions
+        update_root_total_variance(root, region_graph, active_regions)
+
+        # C. allocate
+        probs = priority_distribution(active_regions, cfg)
+        allocation = allocate_fragments(probs, round_budget)
+
+        # D. acquire with current policy
+        fresh_fragments = scheduler.execute(allocation)
+
+        # E. partition all newly observed experience
+        chains = chain_partitioner.process(fresh_fragments)
+        assigned = chain_regionizer.assign(chains)
+        update_archive(assigned)
+        region_graph.observe(...)
+
+        # F. create fresh direct q labels before discarding grouping
+        add_fresh_sigma_labels(fresh_fragments)
+
+        # G. PPO
+        ppo_update(fresh_fragments)
+        policy_version += 1
+
+        # H. refit simple predictor
+        if predictor.ready() and should_refit():
+            predictor.fit()
+
+        # I. log/checkpoint
+        write_logs()
+        maybe_checkpoint()
+```
+
+---
+
+# 39. Partition mechanism test
+
+Create `analysis/partition_diagnostics.py`.
+
+For validation trajectories, log and plot:
+
+- policy-distribution change score;
+- state-change score;
+- percentile threshold;
+- detected boundary locations;
+- chain IDs;
+- task events if available.
+
+Required summary metrics:
+
+```text
+chains per episode
+chain length distribution
+regions per 100k env steps
+entry count per region
+```
+
+Add a synthetic invariance test for the motivating example:
+
+- generate or transform a trajectory with identical behavioral mode;
+- multiply one monotonically changing state coordinate by `1`, `10`, `100`, `1000`;
+- after normalization, the number of behavioral chains should not grow proportionally with scale/path length.
+
+---
+
+# 40. Sigma mechanism test
+
+At frozen policy checkpoints:
+
+1. choose at least 30 regions;
+2. acquire low-budget continuations;
+3. acquire high-budget oracle-like continuations;
+4. compare estimators.
+
+Defaults:
+
+```text
+K_low = 4
+K_high = 64
+```
+
+Compute:
+
+```text
+q_direct_low
+q_direct_high
+q_pred
+q_combined
+```
+
+Report:
+
+- Pearson correlation;
+- Spearman correlation;
+- bootstrap 95% CI;
+- normalized MAE;
+- top-k overlap.
+
+The prior pilot correlation around `0.63` is useful historical context, not a hard pass criterion.
+
+---
+
+# 41. Predictor mechanism test
+
+Use temporal or region holdout.
+
+Train the linear predictor on one subset of labels and evaluate against high-sample \(q_v\) on held-out regions.
+
+Report:
+
+```text
+R^2
+Spearman rho
+MAE
+calibration plot
+```
+
+Also report coefficients:
+
+```text
+intercept
+policy_change
+action_entropy
+state_change
+log_visit_count
+```
+
+If the linear model does not improve finite-sample ranking over direct estimation, keep it as an ablation instead of forcing it into the main method.
+
+---
+
+# 42. Relevance mechanism test
+
+Retain the controlled PPO-delta protocol.
+
+For region \(v\):
+
+1. clone current PPO policy into models A and B;
+2. give both the same matched base PPO update;
+3. give B additional matched region-\(v\) data;
+4. evaluate both on ordinary-reset reference episodes;
+5. compute
+
+   \[
+   \Delta_v=J_{\rm ref}(B)-J_{\rm ref}(A).
+   \]
+
+Measure correlation between cosine \(p_v\) and \(\Delta_v\).
+
+Do not use the old one-step SGD proxy as the mechanism oracle.
+
+---
+
+# 43. Partition unit tests
+
+Create `tests/test_chain_partition.py`.
+
+### Constant policy regime
+
+Large state drift, unchanged policy distribution.
+
+Expected:
+
+```text
+one chain until episode end
+```
+
+### Policy switch
+
+State evolves smoothly but policy mean changes sharply.
+
+Expected:
+
+```text
+boundary near switch
+```
+
+### Scale normalization
+
+Multiply one raw state coordinate by `1000`.
+
+Expected:
+
+```text
+partition approximately unchanged after normalization
+```
+
+### Entry-context clustering
+
+Two long chains have similar `(pre_state, start_state)` but very different endpoints.
+
+Expected:
+
+```text
+same region if entry distance < chain_radius
+```
+
+This protects the exact intended 1 m / 1000 m behavior.
+
+---
+
+# 44. Sigma unit tests
+
+Create `tests/test_sigma_v3.py`.
+
+### Identical futures
+
+```python
+q_hat == 0.0
+sigma_alloc == sigma_floor
+```
+
+### Insufficient data
+
+One fragment:
+
+```python
+math.isnan(q_hat)
+```
+
+not zero.
+
+### Permutation invariance
+
+Reordering continuation fragments must not change `q_hat`.
+
+### Horizon fairness
+
+Two regions with identical first \(M\) future behavior but different total chain lengths must have equal `q_hat`.
+
+### Unbiased Monte Carlo
+
+Construct a synthetic distribution with known covariance trace and verify across repeated trials:
+
+```text
+mean(q_hat) ≈ q_oracle
+```
+
+within statistical tolerance.
+
+---
+
+# 45. Predictor unit tests
+
+Create `tests/test_sigma_predictor.py`.
+
+Synthetic realizable target:
+
+```python
+q = 2.0 + 0.5 * x1 - 0.25 * x2 + noise
+```
+
+with zero-mean noise.
+
+Verify:
+
+- estimated coefficients approach the true values as sample count grows;
+- ridge solve remains finite;
+- intercept is not regularized;
+- non-negative inference clipping works;
+- confidence weights change the weighted fit as expected.
+
+Also include a non-realizable target and ensure tests only require convergence to the best linear fit.
+
+---
+
+# 46. Root unit tests
+
+Create `tests/test_root_region.py`.
+
+### Root exists
+
+```python
+assert regions[0].region_id == 0
+assert regions[0].is_root
+```
+
+### No permanent root lower bound
+
+Synthetic priorities may legitimately yield:
+
+```text
+n0 = 0
+```
+
+for one finite allocation round.
+
+### Degenerate limit
+
+Set all raw `p` to zero and all sigma to the common floor.
+
+Expected:
+
+```text
+priority == uniform
+```
+
+within tolerance.
+
+### Root acquisition
+
+Root job must call environment reset and must not call snapshot restore.
+
+---
+
+# 47. Allocator unit tests
+
+Create `tests/test_allocator_v3.py`.
+
+Analytic priority cases:
+
+```text
+p=[1,1], sigma=[1,1] -> [0.5, 0.5]
+p=[2,1], sigma=[1,1] -> [2/3, 1/3]
+p=[1,1], sigma=[3,1] -> [3/4, 1/4]
+p=[2,1], sigma=[3,1] -> [6/7, 1/7]
+```
+
+No sigma rank transform is allowed in the main path.
+
+---
+
+# 48. Budget accounting
+
+Every training-time environment transition belongs to exactly one category:
+
+```text
+ROOT_ACQUISITION
+REGION_ACQUISITION
+REFERENCE
+```
+
+Track:
+
+```python
+global_train_steps = (
+    root_acquisition_steps
+    + region_acquisition_steps
+    + reference_steps
+)
+```
+
+Assertions every round:
+
+```python
+assert (
+    root_steps
+    + region_steps
+    + reference_steps
+    == global_train_steps
+)
+
+assert global_train_steps <= total_timesteps
+```
+
+No sigma or relevance rollout is free.
+
+Evaluation-only episodes may be tracked separately if the paper explicitly excludes evaluation interaction from training budget.
+
+---
+
+# 49. Logging schema
+
+Global metrics:
+
+```text
+herp/num_regions
+herp/num_chains
+herp/mean_chain_len
+herp/boundary_threshold
+
+allocation/root_fraction
+allocation/entropy
+allocation/max_region_fraction
+
+sigma/direct_mean
+sigma/pred_mean
+sigma/combined_mean
+sigma/root_direct
+sigma/root_total_variance
+sigma/floor_fraction
+
+predictor/num_labels
+predictor/r2_train
+predictor/coef_policy_change
+predictor/coef_action_entropy
+predictor/coef_state_change
+predictor/coef_log_visit_count
+
+relevance/mean
+relevance/root
+relevance/positive_fraction
+
+budget/root_steps
+budget/region_steps
+budget/reference_steps
+budget/global_steps
+```
+
+Per-region table:
+
+```text
+step
+policy_version
+region_id
+is_root
+num_entries
+mean_chain_len
+p_raw
+p_ema
+q_direct
+q_pred
+q_combined
+sigma
+priority
+allocated_fragments
+```
+
+---
+
+# 50. Checkpoint state
+
+Checkpoint must preserve:
+
+```python
+{
+    "policy": ...,
+    "critic": ...,
+    "optimizer": ...,
+
+    "state_normalizer": ...,
+    "action_normalizer": ...,
+    "boundary_normalizer": ...,
+    "boundary_score_buffer": ...,
+
+    "archive": ...,
+    "region_graph": ...,
+
+    "sigma_fragment_metadata": ...,
+    "sigma_predictor_X": ...,
+    "sigma_predictor_y": ...,
+    "sigma_predictor_weight": ...,
+    "sigma_predictor_coef": ...,
+
+    "relevance_tracker": ...,
+
+    "global_train_steps": ...,
+    "policy_version": ...,
+    "allocation_round": ...,
+}
+```
+
+Resume must preserve region IDs, especially root ID `0`.
+
+---
+
+# 51. Migration map from current repository
+
+## `src/herp/regions.py`
+
+Current concept:
+
+```text
+radius clustering over normalized individual states
+```
+
+v3:
+
+```text
+keep as legacy baseline
+move normalizer utility out
+main method uses chain segmentation + chain-entry regionizer
+```
+
+## `src/herp/sigma.py`
+
+Current concept:
+
+```text
+discounted future feature
+pairwise sigma
+branch/dynamics decomposition
+```
+
+v3:
+
+```text
+fixed-M state-action trajectory metric
+direct q U-statistic
+root total-variance diagnostic
+```
+
+Keep old functions under clearly marked legacy/ablation names if needed.
+
+## `src/herp/relevance.py`
+
+Current concept:
+
+```text
+cosine + EMA + separate p normalization
+```
+
+v3:
+
+```text
+keep cosine + EMA
+apply positive floor
+no separate normalization in main path
+```
+
+## `src/herp/allocator.py`
+
+Current concept includes:
+
+```text
+sigma rank transform
+uniform mix
+staleness mix
+n_min
+```
+
+v3 main path:
+
+```text
+score = p_alloc * sigma_alloc
+normalize once
+sample rollout-unit counts
+```
+
+## `src/herp/archive.py`
+
+v3:
+
+```text
+reserve region_id=0 for root
+store chain-entry snapshots
+extend Region statistics
+preserve bounded reservoir sampling
+```
+
+---
+
+# 52. Experimental coding stages
+
+Do not jump directly to full HERP training.
+
+## Stage A — partition only
+
+Run ordinary PPO and only observe chains/regions.
+
+Deliver:
+
+- boundary plots;
+- chain-length distribution;
+- region-count curves;
+- synthetic 1 m / 1000 m invariance test.
+
+## Stage B — sigma only
+
+Freeze policy checkpoints.
+
+Deliver:
+
+- low-budget versus high-budget fixed-\(M\) correlation;
+- variable-length versus fixed-\(M\) comparison;
+- predictor ablation.
+
+## Stage C — relevance only
+
+Run controlled PPO-delta test.
+
+Deliver positive/negative correlation result for cosine relevance.
+
+## Stage D — allocator
+
+Compare:
+
+```text
+PPO / root only
+Uniform region allocation
+Sigma only
+p only
+HERP p*sigma
+```
+
+## Stage E — full suite
+
+Only after A-D pass.
+
+---
+
+# 53. Required algorithm baselines
+
+Minimum end-to-end set:
+
+```text
+PPO
+RND
+Disagreement
+Uniform-region allocation
+HERP-sigma
+HERP-p
+HERP-p*sigma
+```
+
+All must share the same PPO backbone and total environment-interaction accounting.
+
+---
+
+# 54. Failure modes
+
+## Too many regions
+
+Symptoms:
+
+```text
+max_regions reached early
+median entries per region near 1
+```
+
+Check:
+
+- chain radius too small;
+- boundary percentile too low;
+- feature normalization broken.
+
+Do not immediately add region deletion.
+
+## No boundaries
+
+Symptoms:
+
+```text
+one chain per episode
+```
+
+Check:
+
+- policy KL implementation;
+- whether actor distribution changes with state;
+- percentile threshold;
+- score normalization.
+
+## Sigma collapse
+
+Symptoms:
+
+```text
+q_direct ≈ 0 for most regions
+```
+
+Check:
+
+- deterministic policy sampling accidentally enabled;
+- vectorized rollouts share identical RNG state;
+- snapshot restore duplicates RNG state;
+- action normalization;
+- state feature sensitivity.
+
+## Sigma explosion
+
+Check:
+
+- unnormalized state dimensions;
+- padding included as real data;
+- stale policy fragments;
+- one action dimension dominating the trajectory metric.
+
+## Relevance collapse
+
+If all raw cosine values are non-positive, positive floors keep allocation mathematically defined.
+
+Log the event. Do not switch algorithms through an exception branch.
+
+## Root starvation
+
+`n0=0` in one round is valid.
+
+Persistent root starvation should be diagnosed through:
+
+```text
+root p
+root sigma
+root allocation fraction
+new-region discovery rate
+```
+
+Do not add a permanent root quota without an ablation showing it is necessary.
+
+---
+
+# 55. Reproducibility
+
+Log for every run:
+
+```text
+git commit SHA
+seed
+task
+environment version
+torch version
+CUDA version
+simulator version
+num_envs
+future_horizon M
+boundary percentile
+chain radius
+sigma floor
+relevance floor
+predictor ridge
+predictor coefficients
+total environment interactions
+```
+
+Seed Python, NumPy, PyTorch, CUDA, and environment slots independently.
+
+Restored parallel rollouts must not accidentally reuse identical environment RNG streams.
+
+---
+
+# 56. Minimum acceptance gates
+
+Do not launch expensive main experiments until all are true.
+
+1. Constant-behavior long-motion test produces approximately one chain.
+2. Known action-regime switch produces a boundary.
+3. Cross-trajectory clustering is insensitive to interior chain length.
+4. Direct \(\hat q\) passes a synthetic unbiasedness test.
+5. Fixed-\(M\) low-budget estimate positively correlates with high-budget oracle.
+6. Linear predictor does not catastrophically reduce held-out rank correlation.
+7. Cosine relevance has positive controlled PPO-delta correlation.
+8. All-zero raw signals produce uniform allocation through common floors.
+9. Root may receive zero finite-round allocation without crashing.
+10. Selecting root actually resets the environment.
+11. Every training interaction is counted exactly once.
+12. Disabling HERP acquisition reproduces the PPO baseline behavior.
+
+---
+
+# 57. Recommended coding order
+
+Implement in this order:
+
+```text
+1. Chain / Region dataclasses
+2. Gaussian policy divergence
+3. Boundary detector
+4. Online ChainBuilder
+5. Chain-entry clustering
+6. Root region + region graph
+7. Fixed-M RolloutFragment
+8. Direct q estimator + unit tests
+9. Linear variance predictor + unit tests
+10. Relevance main-path simplification
+11. Allocator rewrite
+12. Acquisition scheduler
+13. Fragment-local PPO GAE
+14. Mechanism diagnostics
+15. End-to-end pilot
+```
+
+Do not begin from the allocator. The allocator is the simplest component; correctness depends on the partition and sigma objects first.
+
+---
+
+# 58. Debug-output contract
+
+A debug run should expose something structurally like:
+
+```text
+step=250000
+regions=21
+chains=4382
+
+root:
+    p=0.71
+    q_direct=0.083
+    q_pred=0.074
+    sigma=0.284
+    allocation=7/64
+
+region_4:
+    p=0.66
+    q_direct=0.211
+    q_pred=0.192
+    sigma=0.452
+    allocation=10/64
+
+region_9:
+    p=0.19
+    q_direct=0.330
+    q_pred=0.284
+    sigma=0.557
+    allocation=5/64
+
+allocation_entropy=2.41
+global_train_steps=250000
+budget_check=PASS
+```
+
+Exact values are arbitrary. Required semantics are:
+
+- root appears in the same region table;
+- there is no hard-coded root quota;
+- direct and predicted variance are separately visible;
+- allocation follows \(p\sigma\);
+- budget accounting passes.
+
+---
+
+# 59. Final implementation principle
+
+Keep the ICRA method readable as
+
+```text
+behavioral chain partition
+        ↓
+fixed-M future dispersion σ
+        ↓
+gradient alignment p
+        ↓
+allocation ∝ pσ
+        ↓
+PPO
+```
+
+The linear predictor is deliberately low-capacity. Do not add a learned world model, learned region encoder, Hessian influence estimator, or another exploration bonus to the main HERP v3 path before the minimal method is validated.

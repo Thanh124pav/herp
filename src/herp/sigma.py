@@ -55,3 +55,42 @@ def discounted_future_feature(
     )
     weights = weights / weights.sum().clamp_min(1e-8)
     return (future_features * weights[:, None]).sum(dim=0)
+
+# HERP v3: fixed-window estimators. Earlier functions are legacy-v2 ablations.
+def fixed_window_distance(x, y, min_common_steps=8):
+    common = x.valid_mask & y.valid_mask
+    if int(common.sum()) < min_common_steps:
+        return None
+    return (x.traj_features[common]-y.traj_features[common]).square().sum(-1).mean()
+
+
+def direct_q_estimate(fragments, min_common_steps=8):
+    if len(fragments)>=2 and all(bool(f.valid_mask.all()) and len(f.valid_mask)>=min_common_steps for f in fragments):
+        features=torch.stack([f.traj_features for f in fragments])
+        return full_window_q(features),len(fragments)*(len(fragments)-1)//2
+    pairs = []
+    for i,x in enumerate(fragments):
+        for y in fragments[i+1:]:
+            d = fixed_window_distance(x,y,min_common_steps)
+            if d is not None:
+                pairs.append(d)
+    if not pairs:
+        return float('nan'), 0
+    return float(.5*torch.stack(pairs).mean()),len(pairs)
+
+
+def full_window_q(features):
+    """O(K M D) U-statistic, equivalent to all pairs for complete windows."""
+    if len(features)<2:
+        return float('nan')
+    return float(features.double().var(dim=0,unbiased=True).sum(-1).mean())
+
+
+def root_total_variance(weights, means, q):
+    """Means must be flattened fixed-M representations divided by sqrt(M)."""
+    if not weights:
+        return 0.
+    if set(weights)-set(means):
+        return float('nan')
+    mu = sum(weights[k]*means[k] for k in weights)
+    return sum(weights[k]*(q[k]+float((means[k]-mu).square().sum())) for k in weights)

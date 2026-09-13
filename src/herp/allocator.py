@@ -71,3 +71,58 @@ def allocate_budget(
         )
         allocation += torch.bincount(draws, minlength=len(regions))
     return {region.region_id: int(allocation[i].item()) for i, region in enumerate(regions)}
+
+# HERP v3 allocator: no quota / mixture heuristic. p and sigma are each
+# normalized to the same [0,1] scale before multiplication (see cfg.score_normalize).
+def _normalize(values, mode, floor):
+    import torch
+    v = torch.as_tensor(values, dtype=torch.float64)
+    if mode == 'none' or v.numel() < 2:
+        return v
+    if mode == 'rank':
+        # Average-rank in [0,1]; ties share; constant vector -> 0.5.
+        less = (v[:, None] > v[None, :]).sum(1).double()
+        equal = (v[:, None] == v[None, :]).sum(1).double()
+        return (less + (equal - 1) / 2) / (v.numel() - 1)
+    if mode == 'zscore':
+        mu, sd = v.mean(), v.std(unbiased=False).clamp_min(1e-8)
+        return torch.sigmoid((v - mu) / sd).clamp_min(floor)
+    raise ValueError(f'unknown score_normalize mode {mode!r}')
+
+
+def v3_priority_distribution(regions, cfg, mode='herp'):
+    import torch
+    p_raw = torch.tensor([max(0., r.p_ema) for r in regions], dtype=torch.float64)
+    sigma_raw = torch.tensor([max(cfg.sigma_floor, r.sigma_raw) for r in regions], dtype=torch.float64)
+    if mode == 'plr_region':
+        s_raw = torch.tensor([max(0., r.td_error_ema) for r in regions], dtype=torch.float64)
+    elif mode == 'sacl_style':
+        s_raw = torch.tensor([max(0., r.value_change) for r in regions], dtype=torch.float64)
+    else:
+        s_raw = None
+    p_norm = _normalize(p_raw + cfg.relevance_floor, cfg.score_normalize, cfg.relevance_floor)
+    sigma_norm = _normalize(sigma_raw, cfg.score_normalize, cfg.sigma_floor)
+    p_norm = (p_norm + cfg.relevance_floor).pow(cfg.relevance_alpha)
+    if mode in ('uniform', 'state_radius_uniform'):
+        scores = torch.ones_like(p_norm)
+    elif mode == 'herp_sigma':
+        scores = sigma_norm
+    elif mode == 'herp_p':
+        scores = p_norm
+    elif mode == 'plr_region':
+        scores = _normalize(s_raw, cfg.score_normalize, cfg.relevance_floor) + cfg.relevance_floor
+    elif mode == 'sacl_style':
+        scores = _normalize(s_raw, cfg.score_normalize, cfg.relevance_floor) + cfg.relevance_floor
+    else:
+        scores = p_norm * sigma_norm
+    if cfg.score_temperature != 1.0:
+        scores = scores.clamp_min(1e-12) ** float(cfg.score_temperature)
+    if not len(scores) or not torch.isfinite(scores).all() or (scores < 0).any() or scores.sum() <= 0:
+        raise ValueError('Allocation requires finite positive scores')
+    return scores / scores.sum()
+
+
+def allocate_fragments(probabilities, num_fragments, generator=None):
+    import torch
+    ids = torch.multinomial(probabilities,num_fragments,replacement=True,generator=generator)
+    return torch.bincount(ids,minlength=len(probabilities))

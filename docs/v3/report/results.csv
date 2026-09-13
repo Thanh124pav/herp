@@ -1,0 +1,12 @@
+method,key,status,train_steps,evaluation_step,success,return_mean,eval_episodes,success_auc,activation_step,region_steps,wall_seconds
+PPO,ppo,completed,81920,81920,0.0,9.236437819898129,64,0.0,,0,121.3608283996582
+PPO + RND,rnd,completed,81920,81920,0.0,8.328191749751568,64,0.0,,0,144.4978175163269
+PPO + Disagreement,disagreement,completed,81920,81920,0.0,8.771925702691078,64,0.0,,0,109.80399489402771
+Uniform Revisit,uniform,completed,81920,81920,0.0,9.061870703473687,64,0.0078125,16384.0,62680,199.28289675712585
+State-Radius + Uniform,state_radius_uniform,completed,81920,81920,0.0,7.441945027559996,64,0.0,16384.0,62680,170.3057942390442
+State-Radius + pσ,state_radius_psigma,completed,81920,81920,0.0,7.529861910268664,64,0.0,16384.0,56104,128.36537075042725
+PLR-Region (adapted),plr_region,partial,20480,0,0.0,3.2807700149714947,64,,16384.0,3016,20.648258209228516
+SACL-style (adapted),sacl_style,not run,0,0,,,0,,,0,0.0
+HERP-σ,herp_sigma,not run,0,0,,,0,,,0,0.0
+HERP-p,herp_p,not run,0,0,,,0,,,0,0.0
+HERP-pσ,herp,completed,81920,81920,0.0,8.791108425706625,64,0.0,16384.0,57352,202.27980756759644
