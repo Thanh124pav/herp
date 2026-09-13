@@ -53,7 +53,8 @@ def make_jobs(phase,tasks,seeds,budget,python,td_python,out,num_envs_ppo=512,num
                         if method=='sac' and phase=='pilot':
                             cmd=[python,str(ROOT/'scripts/sac_official.py'),
                                  '--phase',phase,'--num-envs',str(num_envs_sac_native),
-                                 '--num-eval-envs','8','--track','--wandb-project-name','herp-framework',
+                                 '--num-eval-envs','8','--sim-backend','physx_cuda',
+                                 '--buffer-device','cuda','--track','--wandb-project-name','herp-framework',
                                  '--eval-freq','25','--log-freq','10000']
                         else:
                             cmd=[python,str(ROOT/'scripts/train_herp_sac_vector.py'),
@@ -117,6 +118,13 @@ def main():
         previous=json.loads(manifest.read_text())
         old={tuple(j['command']):j for j in previous}
         jobs=[old.get(tuple(j['command']),j) for j in jobs]
+    # A job is completed if its output_dir already has a summary.json (from a
+    # previous partial campaign or an earlier standalone run). Recover this
+    # state even when the manifest was deleted so we never re-run finished work.
+    for job in jobs:
+        if job['status']!='completed' and (Path(job['output_dir'])/'summary.json').exists():
+            job['status']='completed'
+            job['recovered_from_summary']=True
     def save():
         temp=manifest.with_suffix('.tmp');temp.write_text(json.dumps(jobs,indent=2));temp.replace(manifest)
     save()
