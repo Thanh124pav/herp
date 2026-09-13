@@ -42,27 +42,33 @@ def make_jobs(phase,tasks,seeds,budget,python,td_python,out,num_envs_ppo=512,num
                              '--wandb-mode','online','--wandb-project','herp-framework',
                              '--eval-episodes','10','--eval-interval','50000']
                     elif family=='SAC':
-                        # HERP-SAC requires serial acquisition (num_envs=1);
-                        # vanilla SAC pilots use the native ManiSkill SAC
-                        # (num_envs_sac_native=16) so we can actually
-                        # observe saturation within a working day.
+                        # Pilot vanilla SAC uses the ManiSkill upstream SAC
+                        # (native, num_envs_sac_native=16) purely for a fast
+                        # saturation curve. All performance-phase runs go
+                        # through the vectorized HERP-SAC runner so vanilla
+                        # SAC and HERP-SAC share identical num_envs/replay/
+                        # SAC update mechanics — only the acquisition
+                        # allocator differs. scripts/train_herp_sac.py (serial
+                        # num_envs=1) is kept as a debugging backup.
                         if method=='sac' and phase=='pilot':
                             cmd=[python,str(ROOT/'scripts/sac_official.py'),
                                  '--phase',phase,'--num-envs',str(num_envs_sac_native),
                                  '--num-eval-envs','8','--track','--wandb-project-name','herp-framework',
                                  '--eval-freq','25','--log-freq','10000']
                         else:
-                            cmd=[python,str(ROOT/'scripts/train_herp_sac.py'),'--method',method,'--phase',phase,
+                            cmd=[python,str(ROOT/'scripts/train_herp_sac_vector.py'),
+                                 '--method',method,'--phase',phase,
+                                 '--num-envs',str(num_envs_sac_native),'--num-eval-envs','8',
+                                 '--wandb-mode','online','--wandb-project-name','herp-framework',
                                  '--eval-episodes','10','--eval-freq','50000']
                     else:
                         cmd=[td_python,str(ROOT/'scripts/tdmpc2_official.py'),'--phase',phase,'--eval-episodes','10','--eval-interval','50000']
-                    # PPO/SAC vector envs require budget divisible by num_envs;
+                    # Vector envs require budget divisible by num_envs;
                     # round up to preserve headroom rather than truncate.
                     per_run_budget=budget
                     if family=='PPO':
-                        n=1 if method.startswith('herp') else num_envs_ppo
-                        per_run_budget=-(-budget//n)*n
-                    elif family=='SAC' and method=='sac' and phase=='pilot':
+                        per_run_budget=-(-budget//num_envs_ppo)*num_envs_ppo
+                    elif family=='SAC':
                         per_run_budget=-(-budget//num_envs_sac_native)*num_envs_sac_native
                     cmd+=['--env-id',task,'--seed',str(seed),'--total-timesteps',str(per_run_budget),'--output-dir',str(run)]
                     for k,v in variant.items():cmd += ['--'+k.replace('_','-'),str(v)]

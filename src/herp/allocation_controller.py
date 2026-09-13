@@ -37,6 +37,24 @@ class AllocationController:
         snapshot=None if rid==0 else self.archive.sample_snapshot(self.archive.regions[rid])
         return rid,snapshot,probs
 
+    def choose_batch(self, method='herp', n=1, warmup=False, ordinary=False):
+        """Sample `n` region IDs at once for the vector collector.
+
+        Root fallback preserves the same warmup semantics as `choose()`: if
+        we have fewer than `min_non_root_regions` behavioral regions yet, or
+        the caller explicitly forces `warmup=True` / `ordinary=True`, every
+        slot resets from the initial-state distribution instead of restoring.
+        """
+        probs = v3_priority_distribution(self.archive.regions, self.cfg, method)
+        force_root = ordinary or warmup or (len(self.archive) - 1 < self.cfg.min_non_root_regions)
+        if force_root:
+            rids = torch.zeros(n, dtype=torch.long)
+        else:
+            rids = torch.multinomial(probs, n, replacement=True, generator=self.generator)
+        snapshots = [None if int(r) == 0 else self.archive.sample_snapshot(self.archive.regions[int(r)])
+                     for r in rids]
+        return rids, snapshots, probs
+
     def begin_round(self):
         return {r.region_id:region_predictor_features(r) for r in self.archive}
 

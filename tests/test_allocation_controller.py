@@ -155,6 +155,42 @@ def test_finish_round_forks_rng_and_leaves_no_gradients_on_actor_params():
         assert -1 - 1e-6 <= r.p_ema <= 1 + 1e-6
 
 
+def test_choose_batch_root_fallback_and_shape():
+    """Vector variant used by train_herp_sac_vector: returns exactly n rids
+    and n snapshot slots, all pointing at root while warmup is active."""
+    controller, cfg, _ = _controller()
+    rids, snaps, probs = controller.choose_batch('herp', n=8, warmup=True)
+    assert rids.shape == (8,) and len(snaps) == 8
+    assert (rids == 0).all(), 'warmup must force root fallback for every slot'
+    assert all(s is None for s in snaps)
+    # ordinary=True also forces root regardless of archive contents.
+    rids2, _, _ = controller.choose_batch('herp', n=4, ordinary=True)
+    assert (rids2 == 0).all()
+
+
+def test_choose_batch_samples_non_root_when_regions_available():
+    """Once enough non-root regions exist, choose_batch returns multinomial
+    samples from priority_distribution (not all zeros)."""
+    controller, cfg, _ = _controller()
+    # cfg.min_non_root_regions defaults to 8; add exactly that many.
+    for i in range(cfg.min_non_root_regions):
+        controller.archive.add_region(torch.zeros(6), step=i)
+        controller.archive.regions[i + 1].snapshots.append(
+            Snapshot(env_state={}, obs=torch.zeros(3), timestep=i, elapsed_steps=0)
+        )
+        controller.archive.regions[i + 1].sigma_raw = 0.5 * (i + 1)
+        controller.archive.regions[i + 1].p_ema = 0.1 * (i + 1)
+    rids, snaps, probs = controller.choose_batch('herp', n=32)
+    assert rids.shape == (32,)
+    # Not all root: HERP should assign some slots to non-root regions.
+    assert (rids > 0).any(), 'HERP should route some slots to non-root regions'
+    for r, s in zip(rids.tolist(), snaps):
+        if r == 0:
+            assert s is None
+        else:
+            assert s is not None and 1 <= r <= cfg.min_non_root_regions
+
+
 def test_finish_round_survives_missing_reference_and_zero_fragments():
     """Corner: no reference observations (early rounds) and one fragment per
     region (below min_common_steps). Must still populate q_pred via predictor
