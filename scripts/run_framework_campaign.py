@@ -109,6 +109,10 @@ def main():
     p.add_argument('--python',default=sys.executable)
     p.add_argument('--td-python',default=str(ROOT/'.venvs/tdmpc2/bin/python'))
     p.add_argument('--output-dir',type=Path,default=ROOT/'outputs/framework_campaign')
+    p.add_argument('--num-envs-ppo',type=int,default=512,
+                   help='parallel envs for all PPO-backbone methods (auto-scale on bigger GPUs)')
+    p.add_argument('--num-envs-sac',type=int,default=16,
+                   help='parallel envs for vanilla SAC (pilot) and vectorized HERP-SAC')
     p.add_argument('--execute',action='store_true')
     a=p.parse_args()
     if a.budget<=0:p.error('budget must be positive')
@@ -116,7 +120,8 @@ def main():
     budget=a.selected_t or a.budget
     task_budgets=json.loads(a.task_budgets.read_text()) if a.task_budgets else {}
     out=a.output_dir.resolve();out.mkdir(parents=True,exist_ok=True)
-    jobs=make_jobs(a.phase,a.tasks,a.seeds,budget,a.python,a.td_python,out)
+    jobs=make_jobs(a.phase,a.tasks,a.seeds,budget,a.python,a.td_python,out,
+                   num_envs_ppo=a.num_envs_ppo,num_envs_sac_native=a.num_envs_sac)
     for job in jobs:
         if job['task'] in task_budgets:
             amount=int(task_budgets[job['task']])
