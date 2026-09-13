@@ -30,20 +30,41 @@ def json_write(path,data):
 
 @torch.no_grad()
 def evaluate(env,agent,episodes,seed):
+    """Vector eval mirroring train.py's proven eval:
+    - Track per-slot success_once (max across steps).
+    - On done, read info['final_info']["success"] for success_at_end since
+      the vec env auto-resets and info["success"] reflects the NEW episode.
+    - Report both eval_success (once) and eval_success_final for parity
+      with the legacy dispatcher (commit c1c46ac)."""
     obs,_=env.reset(seed=seed)
-    n=env.num_envs;returns=[];successes=[];steps=0
-    ret=torch.zeros(n,device=env.device);success=torch.zeros(n,dtype=torch.bool,device=env.device)
-    while len(returns)<episodes:
+    n=env.num_envs;dev=env.device
+    ep_returns=[];ep_successes=[];ep_successes_final=[]
+    ret=torch.zeros(n,device=dev);per_slot_success=torch.zeros(n,device=dev)
+    steps=0
+    ep_windows=max(1,(episodes+n-1)//n)
+    max_steps=max(50,getattr(env,'max_episode_steps',200))*ep_windows*2
+    while len(ep_returns)<episodes and steps<max_steps:
         action=agent.act(obs,deterministic=True).clamp(env.action_low(),env.action_high())
-        obs,r,term,trunc,info=env.step(action);steps+=n;ret+=r
-        final=info.get('final_info',info)
-        success |= env.success_from_info(info) | env.success_from_info(final)
-        done=term|trunc
-        for i in torch.where(done)[0].tolist():
-            returns.append(float(ret[i]));successes.append(float(success[i]));ret[i]=0;success[i]=False
-    returns=returns[:episodes];successes=successes[:episodes]
-    return dict(eval_return=float(np.mean(returns)),eval_success=float(np.mean(successes)),
-                episode_returns=returns,episode_successes=successes,eval_steps=steps,eval_episodes=episodes)
+        obs,r,term,trunc,info=env.step(action);steps+=1
+        ret=ret+r.to(dev).float()
+        cur_success=env.success_from_info(info).float().to(dev)
+        per_slot_success=torch.maximum(per_slot_success,cur_success)
+        done=term.to(dev)|trunc.to(dev)
+        if bool(done.any()):
+            fi=info.get('final_info') if isinstance(info,dict) else None
+            end_success=(env.success_from_info(fi).float().to(dev) if fi is not None else cur_success)
+            for i in torch.where(done)[0].tolist():
+                ep_returns.append(float(ret[i]))
+                ep_successes.append(max(float(per_slot_success[i]),float(end_success[i])))
+                ep_successes_final.append(float(end_success[i]))
+                ret[i]=0.;per_slot_success[i]=0.
+    ep_returns=ep_returns[:episodes];ep_successes=ep_successes[:episodes];ep_successes_final=ep_successes_final[:episodes]
+    return dict(eval_return=float(np.mean(ep_returns)) if ep_returns else 0.,
+                eval_success=float(np.mean(ep_successes)) if ep_successes else 0.,
+                eval_success_final=float(np.mean(ep_successes_final)) if ep_successes_final else 0.,
+                episode_returns=ep_returns,episode_successes=ep_successes,
+                episode_successes_final=ep_successes_final,
+                eval_steps=steps*n,eval_episodes=len(ep_returns))
 
 
 def main(argv=None):
