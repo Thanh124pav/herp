@@ -80,13 +80,16 @@ RUN chmod +x scripts/fetch_third_party.sh scripts/setup_secondary_venvs.sh \
              scripts/server_deploy.sh scripts/server_run.sh scripts/server_setup.sh \
  && ./scripts/fetch_third_party.sh
 
-# Create isolated venvs for TD-MPC2 (py3.12), MaxInfoRL (py3.12), BRO (py3.11).
-# These are large (~5 GB total) and slow to install (10-20 min per venv). Skip
-# any you don't need by passing SKIP=... into the build via --build-arg:
-#     docker build --build-arg SKIP_VENVS="bro maxinforl" -t herp:cu128 .
-ARG SKIP_VENVS=""
-ENV SKIP="${SKIP_VENVS}"
-RUN ./scripts/setup_secondary_venvs.sh
+# Secondary venvs for TD-MPC2 (py3.12), MaxInfoRL (py3.12), BRO (py3.11)
+# are NOT built here — the pinned requirements have cross-repo CUDA-toolkit
+# conflicts that make the resolver fragile in unattended CI. HERP-PPO,
+# HERP-SAC (vectorized), and vanilla SAC/PPO all run from the main env
+# above; the venvs are only needed for the external SAC/MBRL baselines
+# (BRO, MaxInfoRL, TD-MPC2). To install them on the server:
+#     docker run ... herp:cu128 ./scripts/setup_secondary_venvs.sh
+# Or opt in at build time by uncommenting the RUN below (may fail):
+# ARG BUILD_SECONDARY_VENVS=0
+# RUN if [ "$BUILD_SECONDARY_VENVS" = "1" ]; then ./scripts/setup_secondary_venvs.sh; fi
 
 # --- Optional runtime knobs -----------------------------------------------
 # Determinism (§8.3) — cudnn deterministic + no benchmark. The training scripts
