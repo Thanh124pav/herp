@@ -11,9 +11,9 @@ Python environment. See [`docs/FRAMEWORK_IMPLEMENTATION_STATUS.md`](docs/FRAMEWO
 for validation status and outstanding gates. An entry point existing does not
 mean that its learning-quality gate has passed.
 
-`src/experience_routing/` is historical population replay-routing code, not
-HERP-SAC. It is retained for old results and tests; new HERP code must not depend
-on it. Historical notes below describe earlier revisions.
+The old `src/experience_routing/` population-routing tree was removed in
+2026-09-13; only HERP v3 remains. Historical notes below describe earlier
+revisions before the framework split into HERP-PPO / HERP-SAC.
 
 ## Allocation rule
 
