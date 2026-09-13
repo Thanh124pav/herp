@@ -54,7 +54,12 @@ _setup() {
     "$py" -m venv "$dir"
     "$dir/bin/python" -m pip install --upgrade pip setuptools wheel
     echo "[venvs] $name — installing $reqs (this can take 10-20 minutes)"
-    "$dir/bin/pip" install -r "$reqs"
+    # Torch pins in the freeze were CUDA-suffixed locally; strip the +cuXXX
+    # suffix in requirements files and add the CUDA index here so the CUDA
+    # wheels resolve on servers with matching CUDA runtime (falls through to
+    # CPU wheel if index is unreachable).
+    "$dir/bin/pip" install --extra-index-url "${CUDA_INDEX_URL:-https://download.pytorch.org/whl/cu128}" \
+        -r "$reqs"
     echo "[venvs] $name — done ($(($("$dir/bin/pip" list --format=freeze | wc -l))) packages)"
 }
 
