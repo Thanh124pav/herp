@@ -47,9 +47,11 @@ gymnasium-robotics==1.4.2  # for FetchPush-v4 / FetchPickAndPlace-v4
 # base class can consume it without a bespoke DMC path.
 dm-control==1.0.24
 shimmy[dm-control]==2.0.0
-# MyoSuite optional appendix per EXPERIMENTS §9.2 (Key-Turn-Hard, Obj-Hold-Hard,
-# Pen-Twirl-Hard, Pose-Hard). Comment out if the myosuite wheel bloats the image.
-myosuite==2.9.0
+# MyoSuite (EXPERIMENTS §9.2 appendix) is INTENTIONALLY absent — myosuite <=
+# 2.9.x hard-pins gymnasium==0.29.1, which conflicts with mani-skill /
+# gymnasium-robotics that want gymnasium >= 1.x. Install it into its own venv
+# if the appendix experiment is prioritized:
+#     python -m venv .venvs/myosuite && .venvs/myosuite/bin/pip install myosuite==2.9.0
 
 # --- Experiment tooling ---
 tyro==1.0.16
