@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libglib2.0-0 libxext6 libsm6 libxrender1 \
         libglfw3 libglew-dev libglvnd-dev \
         libvulkan1 mesa-vulkan-drivers \
+        libegl1 libgl1 libgles2 libosmesa6 \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
         python3.11 python3.11-venv python3.11-dev \
@@ -92,7 +93,8 @@ RUN ./scripts/setup_secondary_venvs.sh
 # also set torch.manual_seed / np seeds; these env vars help third-party wheels.
 ENV CUBLAS_WORKSPACE_CONFIG=:4096:8 \
     OMP_NUM_THREADS=1 \
-    MKL_NUM_THREADS=1
+    MKL_NUM_THREADS=1 \
+    MUJOCO_GL=egl
 
 # Non-interactive default: run the full framework pipeline via server_deploy.sh.
 # Override for smoke tests or single stages via `docker run ... <cmd>`.

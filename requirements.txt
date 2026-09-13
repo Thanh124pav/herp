@@ -41,6 +41,15 @@ mujoco==3.3.0
 # --- installed via ``pip install --index-url https://download.pytorch.org/whl/cu128 torch``
 # --- when this file is used for a plain ``pip install -r`` the CPU wheel is picked up.
 gymnasium-robotics==1.4.2  # for FetchPush-v4 / FetchPickAndPlace-v4
+# DeepMind Control Suite — required by THEORY §8 / EXPERIMENTS §8 (Acrobot-Swingup,
+# Finger-Turn-Hard, Hopper-Hop, Walker-Run, Quadruped-Run, Humanoid-Walk).
+# `shimmy` wraps DMC to expose a Gymnasium-compatible API so HERP's adapter
+# base class can consume it without a bespoke DMC path.
+dm-control==1.0.24
+shimmy[dm-control]==2.0.0
+# MyoSuite optional appendix per EXPERIMENTS §9.2 (Key-Turn-Hard, Obj-Hold-Hard,
+# Pen-Twirl-Hard, Pose-Hard). Comment out if the myosuite wheel bloats the image.
+myosuite==2.9.0
 
 # --- Experiment tooling ---
 tyro==1.0.16
