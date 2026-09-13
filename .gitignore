@@ -10,3 +10,6 @@ runs/
 third_party/
 .venv/
 uv.lock
+
+.venvs/
+wandb/

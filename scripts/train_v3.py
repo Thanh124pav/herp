@@ -36,6 +36,7 @@ def evaluate(env,agent,episodes,seed):
       the vec env auto-resets and info["success"] reflects the NEW episode.
     - Report both eval_success (once) and eval_success_final for parity
       with the legacy dispatcher (commit c1c46ac)."""
+    if episodes<1:raise ValueError('Evaluation requires at least one episode')
     obs,_=env.reset(seed=seed)
     n=env.num_envs;dev=env.device
     ep_returns=[];ep_successes=[];ep_successes_final=[]
@@ -48,8 +49,12 @@ def evaluate(env,agent,episodes,seed):
         obs,r,term,trunc,info=env.step(action);steps+=1
         ret=ret+r.to(dev).float()
         cur_success=env.success_from_info(info).float().to(dev)
-        per_slot_success=torch.maximum(per_slot_success,cur_success)
         done=term.to(dev)|trunc.to(dev)
+        fi=info.get('final_info') if isinstance(info,dict) else None
+        end_success=(env.success_from_info(fi).float().to(dev) if fi is not None else cur_success)
+        # Auto-reset observations belong to the next episode, not the one ending.
+        cur_success=torch.where(done,end_success,cur_success)
+        per_slot_success=torch.maximum(per_slot_success,cur_success)
         if bool(done.any()):
             fi=info.get('final_info') if isinstance(info,dict) else None
             end_success=(env.success_from_info(fi).float().to(dev) if fi is not None else cur_success)
@@ -58,10 +63,14 @@ def evaluate(env,agent,episodes,seed):
                 ep_successes.append(max(float(per_slot_success[i]),float(end_success[i])))
                 ep_successes_final.append(float(end_success[i]))
                 ret[i]=0.;per_slot_success[i]=0.
+    if len(ep_returns)<episodes:
+        raise RuntimeError(f'Incomplete evaluation: {len(ep_returns)}/{episodes} episodes')
     ep_returns=ep_returns[:episodes];ep_successes=ep_successes[:episodes];ep_successes_final=ep_successes_final[:episodes]
     return dict(eval_return=float(np.mean(ep_returns)) if ep_returns else 0.,
                 eval_success=float(np.mean(ep_successes)) if ep_successes else 0.,
                 eval_success_final=float(np.mean(ep_successes_final)) if ep_successes_final else 0.,
+                success_once=float(np.mean(ep_successes)) if ep_successes else 0.,
+                success_at_end=float(np.mean(ep_successes_final)) if ep_successes_final else 0.,
                 episode_returns=ep_returns,episode_successes=ep_successes,
                 episode_successes_final=ep_successes_final,
                 eval_steps=steps*n,eval_episodes=len(ep_returns))
@@ -69,6 +78,7 @@ def evaluate(env,agent,episodes,seed):
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--phase',choices=['pilot','ablation','performance','smoke'],default='pilot')
     p.add_argument('--method',choices=METHODS,default='herp')
     p.add_argument('--env-id',default='PickCube-v1'); p.add_argument('--seed',type=int,default=0)
     p.add_argument('--total-timesteps',type=int,default=65536)
@@ -82,6 +92,7 @@ def main(argv=None):
     p.add_argument('--max-regions',type=int,default=64)
     p.add_argument('--chain-radius',type=float,default=2.)
     p.add_argument('--predictor-min-labels',type=int,default=16)
+    p.add_argument('--sigma-kappa',type=float,default=8.)
     p.add_argument('--sigma-mode',choices=['shrinkage','direct','predictor'],default='shrinkage')
     p.add_argument('--score-normalize',choices=['none','rank','zscore'],default='rank',
                    help='p and sigma live on incompatible scales; rank-normalize each to [0,1] before multiplying')
@@ -106,6 +117,8 @@ def main(argv=None):
     p.add_argument('--reward-mode',default='dense')
     p.add_argument('--obs-mode',default='state')
     args=p.parse_args(argv)
+    if args.sigma_kappa<0 or args.future_horizon<2 or args.eval_episodes<1 or args.wandb_log_every<1:
+        p.error('Invalid sigma kappa, horizon, evaluation episodes or logging interval')
     out=Path(args.output_dir);out.mkdir(parents=True,exist_ok=True)
     if not args.resume_from and args.auto_resume:
         candidates=sorted(out.glob('checkpoint_*.pt'),key=lambda x:x.stat().st_mtime)
@@ -115,6 +128,7 @@ def main(argv=None):
     torch.set_num_threads(1);random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
     cfg=HERPV3Config(future_horizon=args.future_horizon,min_common_steps=max(2,args.future_horizon//4),
                     max_regions=args.max_regions,chain_radius=args.chain_radius,predictor_min_labels=args.predictor_min_labels,
+                    sigma_predictor_kappa=args.sigma_kappa,
                     score_normalize=args.score_normalize,score_temperature=args.score_temperature)
     # PPO Args uses upstream ManiSkill defaults EVERYWHERE except the two
     # fields that must reflect our runtime (num_envs, num_steps, device,
@@ -414,6 +428,8 @@ def main(argv=None):
     if wandb_run is not None:
         wandb_run.summary['final/success']=ev['eval_success']
         wandb_run.summary['final/return']=ev['eval_return']
+        wandb_run.summary['final/success_once']=ev['success_once']
+        wandb_run.summary['final/success_at_end']=ev['success_at_end']
         wandb_run.summary['final/global_env_steps']=collector.total_steps
         wandb_run.summary['final/wall_seconds']=time.time()-started
         wandb_run.finish()

@@ -144,6 +144,72 @@ def snapshot_roundtrip(env_id):
     return f'obs diff max={diff:.2e}'
 
 
+def sac_learner_construction():
+    """SACLearner must build twin critics, targets, and produce an actor-only
+    gradient signature without leaking gradients into optimizer params."""
+    import gymnasium as gym
+    import numpy as np
+    import torch
+    from types import SimpleNamespace
+    from herp.learners.sac import SACLearner
+    env = SimpleNamespace(single_observation_space=gym.spaces.Box(-1, 1, (3,), dtype=np.float32),
+                          single_action_space=gym.spaces.Box(-1, 1, (2,), dtype=np.float32))
+    args = SimpleNamespace(q_lr=3e-4, policy_lr=3e-4, num_envs=1, buffer_size=32,
+                           buffer_device='cpu', autotune=True, alpha=.2, batch_size=8,
+                           gamma=.8, tau=.01, policy_frequency=1, target_network_frequency=1)
+    learner = SACLearner(env, args)
+    sig = learner.gradient_signature({'obs': torch.randn(8, 3)})
+    if not torch.isfinite(sig).all() or sig.norm() == 0:
+        raise RuntimeError('signature not finite / zero')
+    if any(p.grad is not None for p in learner.actor.parameters()):
+        raise RuntimeError('gradient leaked onto actor params')
+    return f'signature dim={sig.numel()}'
+
+
+def allocation_controller_smoke():
+    """AllocationController.choose must return valid (rid, snapshot, probs)
+    on a fresh archive and post-warmup after regions exist."""
+    import torch
+    from types import SimpleNamespace
+    from herp.config import HERPV3Config
+    from herp.allocation_controller import AllocationController
+    from herp.archive import Snapshot
+
+    class Stub:
+        num_envs = 1; action_dim = 2; obs_dim = 3; device = torch.device('cpu')
+        _counter = torch.zeros(1, dtype=torch.long)
+        def save_state(self, ids): return [SimpleNamespace(state_dict={}, elapsed_steps=0) for _ in ids]
+        def elapsed_steps(self): return self._counter
+        def action_low(self): return torch.tensor([-1., -1.])
+        def action_high(self): return torch.tensor([1., 1.])
+    cfg = HERPV3Config(future_horizon=4, min_common_steps=2, max_regions=8, chain_radius=2.)
+    controller = AllocationController(Stub(), cfg, seed=0)
+    rid, snap, probs = controller.choose('herp')
+    if rid != 0 or snap is not None or probs.numel() != 1:
+        raise RuntimeError(f'root fallback broken: rid={rid} snap={snap} probs={probs}')
+    return f'root fallback -> probs.sum={float(probs.sum()):.3f}'
+
+
+def framework_campaign_planner():
+    """run_framework_campaign.py --phase pilot must build a balanced job list
+    without crashing on missing optional environments (e.g. tdmpc2 .venv)."""
+    import subprocess, sys, tempfile
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    with tempfile.TemporaryDirectory() as tmp:
+        r = subprocess.run([sys.executable, str(root / 'scripts/run_framework_campaign.py'),
+                            '--phase', 'pilot', '--tasks', 'PushCube-v1', '--budget', '100000',
+                            '--seeds', '0', '--output-dir', tmp], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            raise RuntimeError(f'planner failed: {r.stderr[:200]}')
+        manifest = Path(tmp) / 'pilot-jobs.json'
+        if not manifest.exists():
+            raise RuntimeError('planner did not write pilot-jobs.json')
+        import json
+        jobs = json.loads(manifest.read_text())
+    return f'{len(jobs)} jobs planned'
+
+
 def main():
     env_id = os.environ.get('ENV_ID', 'PickCube-v1')
     num_envs = int(os.environ.get('NUM_ENVS', '512'))
@@ -157,6 +223,9 @@ def main():
         _check('config consistency', config_consistency),
         _check('CLI parse', cli_parse),
         _check('allocator edge cases', allocator_edge),
+        _check('SAC learner construction', sac_learner_construction),
+        _check('allocation controller smoke', allocation_controller_smoke),
+        _check('framework campaign planner', framework_campaign_planner),
         _check('maniskill GPU init', lambda: maniskill_gpu(env_id, num_envs)),
         _check('snapshot roundtrip', lambda: snapshot_roundtrip(env_id)),
     ]

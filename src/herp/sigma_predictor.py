@@ -44,8 +44,10 @@ def region_predictor_features(region):
 
 
 def combined_q(q_direct,q_pred,direct_sample_count,kappa=8.):
+    if direct_sample_count < 0 or kappa < 0:
+        raise ValueError('Sample count and kappa must be nonnegative')
     q_pred = max(0.,q_pred)
-    if not math.isfinite(q_direct):
+    if not math.isfinite(q_direct) or direct_sample_count == 0:
         return q_pred
     lam = direct_sample_count/(direct_sample_count+kappa)
     return lam*max(0.,q_direct)+(1-lam)*q_pred

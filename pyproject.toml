@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "experience-routing"
+name = "herp-allocation"
 version = "0.1.0"
-description = "Receiver-aware experience routing in robot policy populations (MVP)"
+description = "Behavior-aware environment-interaction allocation for reinforcement learning"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

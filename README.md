@@ -1,36 +1,28 @@
 # HERP — Hindsight Experience Rollout Prioritisation
 
-Two research lines share this repository:
+HERP is a **behavior-aware interaction allocation framework**: it chooses where
+new environment interactions are collected; PPO/SAC remain the downstream
+learners. The main specification is
+[`HERP_UPDATED_POSITIONING_BASELINES_EXPERIMENTS_v2.md`](HERP_UPDATED_POSITIONING_BASELINES_EXPERIMENTS_v2.md).
 
-1. **HERP** — the primary line (ICRA 2027 target). Online PPO with a fixed
-   interaction budget, allocating rollout among trajectory-space *regions*
-   using two learned quantities `σ_v` (future branching / exploration need)
-   and `p_v` (performance relevance of updates from a region).
-   Math: [`THEORY.md`](THEORY.md). Refactor + run instructions:
-   [`IMPLEMENTATION.md`](IMPLEMENTATION.md).
-2. **Experience routing (PLAN.md)** — an older parallel SAC-population
-   line: donor→receiver replay routing between independently learning
-   policies, evaluated on a synthetic reacher and Meta-World. Code lives
-   under `src/experience_routing/` and is **not** in scope for HERP work.
-   Full write-up: [`PLAN.md`](PLAN.md).
+The reproducible PPO core is `scripts/train_v3.py`. Native SAC is
+`scripts/sac_official.py`; TD-MPC2 uses `scripts/tdmpc2_official.py` with its own
+Python environment. See [`docs/FRAMEWORK_IMPLEMENTATION_STATUS.md`](docs/FRAMEWORK_IMPLEMENTATION_STATUS.md)
+for validation status and outstanding gates. An entry point existing does not
+mean that its learning-quality gate has passed.
 
-If you are a Claude CLI reading this repo, your entry point is
-[`IMPLEMENTATION.md`](IMPLEMENTATION.md) — do not start editing before
-running its §2.8 green-light block.
+`src/experience_routing/` is historical population replay-routing code, not
+HERP-SAC. It is retained for old results and tests; new HERP code must not depend
+on it. Historical notes below describe earlier revisions.
 
----
+## Allocation rule
 
-## HERP allocation rule
-
-For each region `v` visited during training, HERP estimates
-`σ_v` (variance of returns over short probe branches) and `p_v`
-(relevance of a policy update collected in `v` to reference performance).
-Interactions are allocated so that
-
-    n_v ∝ p_v · σ_v
-
-subject to a fixed total interaction budget. Baselines: uniform PPO, RND,
-Disagreement, and single-factor ablations of HERP.
+For each behavioral region, HERP estimates downstream policy-learning relevance
+`p_v` and dispersion `sigma_v` of fixed-length future continuations. It allocates
+new interactions according to `n_v ∝ p_v * sigma_v`. Reference and probing
+interactions count toward the training budget. Evaluation interactions are
+reported separately. Replay samples and imagined transitions are not raw
+training interactions.
 
 ## Current state (2026-09-10)
 
