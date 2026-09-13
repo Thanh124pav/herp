@@ -77,6 +77,13 @@ def main(argv=None):
     p.add_argument('--wandb-run-name',default='')
     p.add_argument('--wandb-tags',default='')
     p.add_argument('--wandb-log-every',type=int,default=1)
+    # Env config knobs — must match the upstream ManiSkill PPO baseline
+    # (pd_ee_delta_pose + dense) to reproduce the 100%-success 1M runs;
+    # the adapter's own defaults (pd_joint_delta_pos + normalized_dense)
+    # are much harder to solve at this budget.
+    p.add_argument('--control-mode',default='pd_ee_delta_pose')
+    p.add_argument('--reward-mode',default='dense')
+    p.add_argument('--obs-mode',default='state')
     args=p.parse_args(argv)
     out=Path(args.output_dir);out.mkdir(parents=True,exist_ok=True)
     if not args.resume_from and args.auto_resume:
@@ -92,9 +99,9 @@ def main(argv=None):
     vector=args.num_envs>1
     device='cuda' if vector else 'cpu';sim='physx_cuda' if vector else 'physx_cpu'
     if vector and args.total_timesteps%args.num_envs:raise ValueError('Vector budget must be divisible by num_envs')
-    env=ManiSkillAdapter(args.env_id,sim_backend=sim,render_backend='cpu',device=device).make(args.num_envs,args.seed)
+    env=ManiSkillAdapter(args.env_id,control_mode=args.control_mode,obs_mode=args.obs_mode,reward_mode=args.reward_mode,sim_backend=sim,render_backend='cpu',device=device).make(args.num_envs,args.seed)
     env.reset(seed=args.seed)
-    eval_env=ManiSkillAdapter(args.env_id,sim_backend=sim,render_backend='cpu',device=device,ignore_terminations=True).make(args.num_eval_envs if vector else 1,args.seed+10000)
+    eval_env=ManiSkillAdapter(args.env_id,control_mode=args.control_mode,obs_mode=args.obs_mode,reward_mode=args.reward_mode,sim_backend=sim,render_backend='cpu',device=device,ignore_terminations=True).make(args.num_eval_envs if vector else 1,args.seed+10000)
     agent=Agent(env.obs_dim,env.action_dim).to(device);optimizer=torch.optim.Adam(agent.parameters(),lr=ppo.learning_rate,eps=1e-5)
     normalizer=RunningFeatureNormalizer(eps=1e-3)
     archive=RegionArchive(cfg.max_snapshots_per_region,args.seed);archive.ensure_root()
@@ -341,7 +348,8 @@ def main(argv=None):
             wall_seconds=time.time()-started,collection_seconds=collection_seconds,processing_seconds=processing_seconds,update_seconds=update_seconds,budget=collector.counters.copy(),num_regions=len(archive),
             num_chains=observer.chains,predictor_labels=len(predictor.y),activation_step=activation,
             root_direct=archive.regions[0].q_direct,root_total_variance=root_q,root_missing_child_means=missing_root_means,
-            root_fraction=allocations.get(0,0)/max(1,sum(allocations.values())),allocation_entropy=float(-(probs*probs.log()).sum()),
+            root_fraction=allocations.get(0,0)/max(1,sum(allocations.values())),
+            allocation_entropy=float(-torch.special.xlogy(probs,probs.clamp_min(1e-12)).sum()),
             losses=losses)
         metrics_file.write(json.dumps(record)+'\n')
         for r in archive:
