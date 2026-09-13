@@ -55,7 +55,11 @@ def make_jobs(phase,tasks,seeds,budget,python,td_python,out,num_envs_ppo=512,num
                                  '--phase',phase,'--num-envs',str(num_envs_sac_native),
                                  '--num-eval-envs','8','--sim-backend','physx_cuda',
                                  '--buffer-device','cuda','--track','--wandb-project-name','herp-framework',
-                                 '--eval-freq','25','--log-freq','10000']
+                                 '--eval-freq','25','--log-freq','10000',
+                                 # rgb_array render requires Vulkan-CUDA interop which the WSL
+                                 # llvmpipe ICD used for physx_cuda cannot provide. Turn video
+                                 # capture off; success/return are logged from raw obs anyway.
+                                 '--no-capture-video','--no-save-trajectory']
                         else:
                             cmd=[python,str(ROOT/'scripts/train_herp_sac_vector.py'),
                                  '--method',method,'--phase',phase,
