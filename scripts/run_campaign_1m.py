@@ -47,22 +47,27 @@ SIGMA_ABLATIONS = [
     ('sigma_shrinkage_M32','herp', dict(sigma_mode='shrinkage',  future_horizon=32)),
 ]
 
-# Tier-A main runs at 1M steps. HERP first (user's stated priority), then the
-# closest exploration / revisit baselines. External SAC-based baselines
-# (RFCL/ActiveRL/BRO/MaxInfoRL) are launched via their own third_party runners
-# — this orchestrator only covers same-backbone PPO methods.
+# Tier-A main runs at 1M steps. Order (user-requested):
+#   1. PPO — sanity check the training/eval pipeline works at all.
+#   2. HERP (+ its two ablations) — the method the paper is about.
+#   3. Closest external baselines, most recent first: SACL (AAAI 2024),
+#      PLR (ICML 2021), Disagreement (ICML 2019), RND (ICLR 2019).
+#   4. Internal HERP-v2 / uniform ablations last.
+# External SAC-based baselines (RFCL/ActiveRL/BRO/MaxInfoRL) are launched
+# via their own third_party runners — this orchestrator only covers
+# same-backbone PPO methods.
 MAIN_METHODS = [
+    'ppo',                    # A0 — 2017; runs first as a pipeline sanity check
     'herp',                   # p * sigma  (Contribution 3)
-    'herp_sigma',             # sigma-only ablation
     'herp_p',                 # p-only ablation
-    'ppo',                    # A0
-    'rnd',                    # A1
-    'disagreement',           # A2
-    'uniform',                # A4  Uniform Region Revisit
-    'state_radius_uniform',   # A5.1
-    'state_radius_psigma',    # A5.2
-    'plr_region',             # A6 (HERP-setting PLR)
-    'sacl_style',             # A7 (HERP-setting SACL)
+    'herp_sigma',             # sigma-only ablation
+    'sacl_style',             # A7 — SACL AAAI 2024 (HERP-setting adaptation)
+    'plr_region',             # A6 — PLR ICML 2021 (HERP-setting adaptation)
+    'disagreement',           # A2 — Pathak et al. ICML 2019
+    'rnd',                    # A1 — Burda et al. ICLR 2019
+    'state_radius_psigma',    # A5.2 — internal HERP-v2 baseline
+    'state_radius_uniform',   # A5.1 — internal HERP-v2 baseline
+    'uniform',                # A4 — pure allocation ablation
 ]
 
 
