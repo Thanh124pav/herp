@@ -124,17 +124,26 @@ def _run_one(run_dir: Path, base_cli: list[str], extra_cli: list[str],
     return code, record
 
 
+def _round_up(n: int, k: int) -> int:
+    """Round n up to the nearest multiple of k (train_v3 requires divisibility)."""
+    return ((int(n) + int(k) - 1) // int(k)) * int(k)
+
+
 def _build_cli(env_id: str, seed: int, timesteps: int, num_envs: int,
                num_eval_envs: int, eval_interval: int, eval_episodes: int,
                checkpoint_interval: int, wandb_mode: str, wandb_project: str,
                wandb_entity: str, wandb_group: str, extra_wandb_tags: list[str]) -> list[str]:
     tags = ','.join(extra_wandb_tags)
+    # train_v3 asserts total_timesteps % num_envs == 0 when vectorized.
+    total = _round_up(timesteps, num_envs) if num_envs > 1 else int(timesteps)
+    eval_iv = _round_up(eval_interval, num_envs) if num_envs > 1 else int(eval_interval)
+    ckpt_iv = _round_up(checkpoint_interval, num_envs) if num_envs > 1 else int(checkpoint_interval)
     return [
         '--env-id', env_id, '--seed', str(seed),
         '--num-envs', str(num_envs), '--num-eval-envs', str(num_eval_envs),
-        '--total-timesteps', str(timesteps),
-        '--eval-interval', str(eval_interval), '--eval-episodes', str(eval_episodes),
-        '--checkpoint-interval', str(checkpoint_interval),
+        '--total-timesteps', str(total),
+        '--eval-interval', str(eval_iv), '--eval-episodes', str(eval_episodes),
+        '--checkpoint-interval', str(ckpt_iv),
         '--wandb-mode', wandb_mode,
         '--wandb-project', wandb_project,
         *(['--wandb-entity', wandb_entity] if wandb_entity else []),
