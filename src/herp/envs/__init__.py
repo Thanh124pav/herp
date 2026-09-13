@@ -15,7 +15,10 @@ def make_adapter(benchmark: str, **kwargs) -> EnvAdapter:
     if benchmark == "fetch":
         from .fetch import FetchAdapter
         return FetchAdapter(**kwargs)
-    raise ValueError(f"Unknown benchmark {benchmark!r}; expected maniskill/metaworld/fetch")
+    if benchmark == "dmc":
+        from .dmc import DMCAdapter
+        return DMCAdapter(**kwargs)
+    raise ValueError(f"Unknown benchmark {benchmark!r}; expected maniskill/metaworld/fetch/dmc")
 
 
 __all__ = ["EnvAdapter", "make_adapter"]
