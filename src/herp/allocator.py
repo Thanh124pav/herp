@@ -130,7 +130,29 @@ def v3_priority_distribution(regions, cfg, mode='herp'):
         scores = scores.clamp_min(1e-12) ** float(cfg.score_temperature)
     if not len(scores) or not torch.isfinite(scores).all() or (scores < 0).any() or scores.sum() <= 0:
         raise ValueError('Allocation requires finite positive scores')
-    return scores / scores.sum()
+    probs = scores / scores.sum()
+    # EXPERIMENTS §26 V2: convex mix with uniform. Prevents rank-normalization
+    # from starving any region (including root) below 1/N budget share.
+    mix = float(getattr(cfg, 'uniform_mix', 0.0))
+    if mix > 0:
+        probs = (1.0 - mix) * probs + mix / probs.numel()
+    # EXPERIMENTS §26 V1: hard root lower bound. Guarantees region 0 receives at
+    # least root_floor of the allocation regardless of its learned p*sigma
+    # score. THEORY §13 explicitly declines to REQUIRE this, but empirically a
+    # small floor (0.10-0.25) helps when HERP's rank-normalized score drops the
+    # root fraction below what PPO's on-policy value function needs.
+    floor = float(getattr(cfg, 'root_floor', 0.0))
+    if floor > 0 and probs.numel() >= 1:
+        if probs[0] < floor:
+            residual = 1.0 - floor
+            other = probs[1:].sum()
+            probs = probs.clone()
+            probs[0] = floor
+            if other > 0:
+                probs[1:] = probs[1:] * (residual / other)
+            elif probs.numel() > 1:
+                probs[1:] = residual / (probs.numel() - 1)
+    return probs
 
 
 def allocate_fragments(probabilities, num_fragments, generator=None):

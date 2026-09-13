@@ -124,6 +124,45 @@ def test_allocator_analytic_uniform_and_root_zero_allowed():
     assert AcquisitionScheduler(ar).make_jobs({0:1})[0].snapshot is None
 
 
+def test_root_floor_and_uniform_mix_v1_v2_ablations():
+    """EXPERIMENTS §26 V1/V2 root-handling ablations. root_floor guarantees
+    region 0 gets at least the specified fraction; uniform_mix convex-mixes
+    the priority distribution with uniform to prevent starvation. When both
+    are zero, the main-method V3 (root as ordinary candidate) is unchanged."""
+    from herp.allocator import v3_priority_distribution
+    from types import SimpleNamespace
+    # 5-region setup where root has near-zero p*sigma (rank normalization
+    # gives root a small share by default).
+    regs = [SimpleNamespace(p_ema=p, sigma_raw=s)
+            for p, s in [(0.05, 0.05), (0.9, 1.0), (0.8, 0.9), (0.7, 0.8), (0.6, 0.7)]]
+    base = HERPV3Config(score_normalize='rank')
+    d0 = v3_priority_distribution(regs, base)
+    assert d0[0].item() < 0.15, 'baseline root should get < 15% here'
+    # V1: root_floor lifts the root allocation.
+    for floor in (0.15, 0.25, 0.40):
+        cfg = HERPV3Config(score_normalize='rank', root_floor=floor)
+        d = v3_priority_distribution(regs, cfg)
+        assert abs(float(d.sum()) - 1.0) < 1e-6
+        assert d[0].item() >= floor - 1e-6, f'root_floor={floor} not enforced: got {d[0]}'
+        # Non-root probs preserve their relative order.
+        assert list(torch.argsort(d[1:], descending=True).tolist()) == \
+               list(torch.argsort(d0[1:], descending=True).tolist())
+    # V2: uniform_mix pushes root and cold regions toward 1/N.
+    cfg = HERPV3Config(score_normalize='rank', uniform_mix=0.5)
+    d = v3_priority_distribution(regs, cfg)
+    assert abs(float(d.sum()) - 1.0) < 1e-6
+    assert d[0].item() > d0[0].item(), 'uniform_mix should lift root'
+    # V1+V2 together.
+    cfg = HERPV3Config(score_normalize='rank', root_floor=0.15, uniform_mix=0.10)
+    d = v3_priority_distribution(regs, cfg)
+    assert d[0].item() >= 0.15 - 1e-6
+    assert abs(float(d.sum()) - 1.0) < 1e-6
+    # Root already above floor: no-op.
+    high_root = [SimpleNamespace(p_ema=1.0, sigma_raw=1.0), SimpleNamespace(p_ema=0.01, sigma_raw=0.01)]
+    d = v3_priority_distribution(high_root, HERPV3Config(score_normalize='rank', root_floor=0.05))
+    assert d[0].item() > 0.5  # unchanged from natural high
+
+
 def test_allocator_survives_degenerate_signals():
     """Boundary cases: all-zero p, all-zero sigma, mixed nan-tolerant p_ema.
     THEORY §24 guarantees the allocator produces a valid distribution in

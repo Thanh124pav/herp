@@ -97,6 +97,10 @@ def main(argv=None):
     p.add_argument('--score-normalize',choices=['none','rank','zscore'],default='rank',
                    help='p and sigma live on incompatible scales; rank-normalize each to [0,1] before multiplying')
     p.add_argument('--score-temperature',type=float,default=1.0)
+    p.add_argument('--root-floor',type=float,default=0.0,
+                   help='EXPERIMENTS §26 V1: guarantee n_0 >= root_floor of budget')
+    p.add_argument('--uniform-mix',type=float,default=0.0,
+                   help='EXPERIMENTS §26 V2: convex mix priority distribution with uniform')
     p.add_argument('--output-dir',required=True);p.add_argument('--resume-from',default='',
                    help='exact checkpoint path; use --auto-resume to pick latest automatically')
     p.add_argument('--auto-resume',action='store_true',
@@ -126,10 +130,13 @@ def main(argv=None):
             args.resume_from=str(candidates[-1])
             print(f'[auto-resume] loading {args.resume_from}',flush=True)
     torch.set_num_threads(1);random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
+    if not 0 <= args.root_floor < 1 or not 0 <= args.uniform_mix < 1:
+        p.error('root-floor and uniform-mix must lie in [0, 1)')
     cfg=HERPV3Config(future_horizon=args.future_horizon,min_common_steps=max(2,args.future_horizon//4),
                     max_regions=args.max_regions,chain_radius=args.chain_radius,predictor_min_labels=args.predictor_min_labels,
                     sigma_predictor_kappa=args.sigma_kappa,
-                    score_normalize=args.score_normalize,score_temperature=args.score_temperature)
+                    score_normalize=args.score_normalize,score_temperature=args.score_temperature,
+                    root_floor=args.root_floor,uniform_mix=args.uniform_mix)
     # PPO Args uses upstream ManiSkill defaults EVERYWHERE except the two
     # fields that must reflect our runtime (num_envs, num_steps, device,
     # sim_backend). Any deviation from upstream is unfair to the PPO baseline

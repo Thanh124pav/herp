@@ -23,6 +23,13 @@ def make_jobs(phase,tasks,seeds,budget,python,td_python,out,num_envs_ppo=512,num
         methods=[('PPO','herp',2026)]
         variants=[dict(sigma_mode=mode,future_horizon=m,sigma_kappa=8.) for mode in ('direct','predictor','shrinkage') for m in (16,32,64)]
         variants += [dict(sigma_mode='shrinkage',future_horizon=32,sigma_kappa=k) for k in (0.,2.,32.)]
+        # EXPERIMENTS §26 root-handling ablations. V3 (root as ordinary
+        # candidate) is variants[0..11] above; add V1 (hard floor) and V2
+        # (uniform mix) so the paper's root-handling table has empirical
+        # numbers rather than only the non-claim from THEORY §32.
+        variants += [dict(sigma_mode='shrinkage',future_horizon=32,sigma_kappa=8.,root_floor=f) for f in (0.10,0.25)]
+        variants += [dict(sigma_mode='shrinkage',future_horizon=32,sigma_kappa=8.,uniform_mix=0.10)]
+        variants += [dict(sigma_mode='shrinkage',future_horizon=32,sigma_kappa=8.,root_floor=0.15,uniform_mix=0.10)]
     jobs=[]
     for seed in seeds:
         for difficulty,task in enumerate(tasks):

@@ -35,3 +35,9 @@ class HERPV3Config:
     # so neither factor swamps the other. THEORY §22 preserves ordering.
     score_normalize: str = 'rank'  # {'none','rank','zscore'}
     score_temperature: float = 1.
+    # EXPERIMENTS §26 root-handling ablations. Both default to 0 so V3 ("root as
+    # ordinary candidate", THEORY §13) is the main-method behavior. Set nonzero
+    # to test V1 (hard root lower bound n_0 >= root_floor) or V2 (mix priority
+    # with uniform to prevent starvation of cold regions AND root).
+    root_floor: float = 0.0  # min fraction of allocation reserved for region 0
+    uniform_mix: float = 0.0  # convex mix weight with uniform over all regions
