@@ -68,7 +68,7 @@ WANDB_MODE="${WANDB_MODE:-online}"
 WANDB_PROJECT="${WANDB_PROJECT:-herp-v3}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
 WANDB_GROUP="${WANDB_GROUP:-}"
-PRIORITY_FIRST="${PRIORITY_FIRST:-herp}"
+PRIORITY_FIRST="${PRIORITY_FIRST:-ppo,herp}"
 DEADLINE_HOURS="${DEADLINE_HOURS:-0}"
 
 # --- wandb sanity check ----------------------------------------------------
