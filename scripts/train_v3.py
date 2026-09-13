@@ -116,7 +116,17 @@ def main(argv=None):
     cfg=HERPV3Config(future_horizon=args.future_horizon,min_common_steps=max(2,args.future_horizon//4),
                     max_regions=args.max_regions,chain_radius=args.chain_radius,predictor_min_labels=args.predictor_min_labels,
                     score_normalize=args.score_normalize,score_temperature=args.score_temperature)
-    ppo=Args(num_envs=args.num_envs,num_steps=cfg.future_horizon if args.num_envs>1 else args.batch_size,num_minibatches=8,device='cuda' if args.num_envs>1 else 'cpu',sim_backend='physx_cuda' if args.num_envs>1 else 'physx_cpu')
+    # PPO Args uses upstream ManiSkill defaults EVERYWHERE except the two
+    # fields that must reflect our runtime (num_envs, num_steps, device,
+    # sim_backend). Any deviation from upstream is unfair to the PPO baseline
+    # and would confound HERP's causal comparison. Local runs must match the
+    # server's hyperparams for the "1M steps reach ~100% success" report to
+    # replicate. Notably num_minibatches stays at the upstream default (32);
+    # a prior override to 8 caused PPO to collapse at ~1.4M steps.
+    ppo=Args(num_envs=args.num_envs,
+             num_steps=cfg.future_horizon if args.num_envs>1 else args.batch_size,
+             device='cuda' if args.num_envs>1 else 'cpu',
+             sim_backend='physx_cuda' if args.num_envs>1 else 'physx_cpu')
     vector=args.num_envs>1
     device='cuda' if vector else 'cpu';sim='physx_cuda' if vector else 'physx_cpu'
     if vector and args.total_timesteps%args.num_envs:raise ValueError('Vector budget must be divisible by num_envs')

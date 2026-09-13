@@ -75,15 +75,26 @@ def allocate_budget(
 # HERP v3 allocator: no quota / mixture heuristic. p and sigma are each
 # normalized to the same [0,1] scale before multiplication (see cfg.score_normalize).
 def _normalize(values, mode, floor):
+    """Map region scores to a comparable non-negative scale.
+
+    'rank' uses Weibull plotting position r/(N+1) instead of the plain
+    average rank r/(N-1), so the smallest region gets 1/(N+1) > 0 rather
+    than exactly zero. This preserves THEORY §12's guarantee that finite
+    data never makes a region permanently dead — a plain rank would let
+    the multiplication p*sigma silently zero out the worst region even
+    with the floor.
+    """
     import torch
     v = torch.as_tensor(values, dtype=torch.float64)
     if mode == 'none' or v.numel() < 2:
         return v
     if mode == 'rank':
-        # Average-rank in [0,1]; ties share; constant vector -> 0.5.
+        # Ties (equal count E for a value): all share position (less + (E+1)/2)/(N+1).
+        # Unique min: less=0, equal=1 -> 1/(N+1); unique max: less=N-1, equal=1 -> N/(N+1).
+        # All-equal constant vector: less=0, equal=N -> 0.5 for every entry.
         less = (v[:, None] > v[None, :]).sum(1).double()
         equal = (v[:, None] == v[None, :]).sum(1).double()
-        return (less + (equal - 1) / 2) / (v.numel() - 1)
+        return (less + (equal + 1) / 2) / (v.numel() + 1)
     if mode == 'zscore':
         mu, sd = v.mean(), v.std(unbiased=False).clamp_min(1e-8)
         return torch.sigmoid((v - mu) / sd).clamp_min(floor)

@@ -100,19 +100,49 @@ def test_allocator_analytic_uniform_and_root_zero_allowed():
         torch.testing.assert_close(v3_priority_distribution(regs,cfg),torch.tensor(expect,dtype=torch.float64))
     regs=[SimpleNamespace(p_ema=0.,sigma_raw=.001) for _ in range(4)]
     torch.testing.assert_close(v3_priority_distribution(regs,HERPV3Config()),torch.full((4,),.25,dtype=torch.float64))
-    # Default (rank-normalized): the top-p top-sigma region should dominate;
-    # a region high in one but bottom in the other is de-weighted, so
-    # neither factor can swamp the other regardless of raw scale.
+    # Default (rank-normalized, Weibull position): top-p top-sigma dominates,
+    # but no region ever gets probability zero — the smallest still receives
+    # 1/(N+1) rank mass so it can be re-explored (THEORY §12 dead-region rule).
     cfg_rank=HERPV3Config(relevance_floor=1e-3)
     regs=[SimpleNamespace(p_ema=p,sigma_raw=s)
           for p,s in [(0.01,50.),(0.9,0.001),(0.5,1.),(0.7,10.)]]
     dist=v3_priority_distribution(regs,cfg_rank)
-    assert dist.argmax().item()==3
-    assert dist.min().item()<1e-6  # (0.9 p, tiny sigma) collapses under rank
+    assert dist.argmax().item()==3, 'high-p high-sigma region should dominate'
+    assert (dist > 0).all(), 'no region may be permanently dead-weighted'
+    # A single-region allocator degenerates to a point mass.
+    single=[SimpleNamespace(p_ema=.5,sigma_raw=.1)]
+    torch.testing.assert_close(v3_priority_distribution(single,cfg_rank),torch.tensor([1.],dtype=torch.float64))
+    # All-equal regions: symmetric allocator falls back to uniform under every mode.
+    for mode in ('rank','zscore','none'):
+        c=HERPV3Config(score_normalize=mode,relevance_floor=1e-3)
+        rs=[SimpleNamespace(p_ema=.4,sigma_raw=.7) for _ in range(5)]
+        d=v3_priority_distribution(rs,c)
+        torch.testing.assert_close(d,torch.full((5,),.2,dtype=torch.float64),atol=1e-8,rtol=1e-8)
     counts=allocate_fragments(torch.tensor([0.,1.]),20)
     assert counts.tolist()==[0,20]
     ar=RegionArchive();ar.ensure_root()
     assert AcquisitionScheduler(ar).make_jobs({0:1})[0].snapshot is None
+
+
+def test_allocator_survives_degenerate_signals():
+    """Boundary cases: all-zero p, all-zero sigma, mixed nan-tolerant p_ema.
+    THEORY §24 guarantees the allocator produces a valid distribution in
+    every finite regime — no NaN, no negative, sums to 1."""
+    cfg=HERPV3Config(score_normalize='rank',relevance_floor=1e-3,sigma_floor=1e-3)
+    # All p=0: sigma alone drives the ranking; still finite and normalized.
+    regs=[SimpleNamespace(p_ema=0.,sigma_raw=s) for s in (.1,.5,1.)]
+    d=v3_priority_distribution(regs,cfg)
+    assert torch.isfinite(d).all() and (d>0).all()
+    torch.testing.assert_close(d.sum(),torch.tensor(1.,dtype=torch.float64))
+    # All sigma=0 (below floor): p alone drives; floor prevents NaN.
+    regs=[SimpleNamespace(p_ema=p,sigma_raw=0.) for p in (.1,.5,.9)]
+    d=v3_priority_distribution(regs,cfg)
+    assert torch.isfinite(d).all() and (d>0).all()
+    # Negative p_ema (raw cosine misalignment) must clip to zero, not propagate.
+    regs=[SimpleNamespace(p_ema=-.5,sigma_raw=.5),SimpleNamespace(p_ema=.5,sigma_raw=.5)]
+    d=v3_priority_distribution(regs,cfg)
+    assert torch.isfinite(d).all() and (d>=0).all()
+    torch.testing.assert_close(d.sum(),torch.tensor(1.,dtype=torch.float64))
 
 
 def test_fragment_gae_bootstraps_but_does_not_cross_jobs():

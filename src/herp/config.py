@@ -9,7 +9,7 @@ class HERPV3Config:
     boundary_lambda_state: float = 0.
     boundary_min_chain_len: int = 2
     boundary_score_buffer: int = 4096
-    chain_radius: float = .75
+    chain_radius: float = 2.  # matches scripts/train_v3.py CLI default
     max_regions: int = 256
     centroid_tau: float = .05
     action_feature_weight: float = 1.
