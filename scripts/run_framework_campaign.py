@@ -51,11 +51,17 @@ def make_jobs(phase,tasks,seeds,budget,python,td_python,out,num_envs_ppo=512,num
                         # allocator differs. scripts/train_herp_sac.py (serial
                         # num_envs=1) is kept as a debugging backup.
                         if method=='sac' and phase=='pilot':
+                            # sac_official.py's --eval-freq is compared against
+                            # global_step (env steps), NOT training iterations
+                            # like its docstring claims — passing 25 fires eval
+                            # every 25 env steps and dominates wall time
+                            # (checkpoint save happens on every eval too).
+                            # Match PPO's eval cadence (~50k env steps).
                             cmd=[python,str(ROOT/'scripts/sac_official.py'),
                                  '--phase',phase,'--num-envs',str(num_envs_sac_native),
                                  '--num-eval-envs','8','--sim-backend','physx_cuda',
                                  '--buffer-device','cuda','--track','--wandb-project-name','herp-framework',
-                                 '--eval-freq','25','--log-freq','10000',
+                                 '--eval-freq','50000','--log-freq','10000',
                                  # rgb_array render requires Vulkan-CUDA interop which the WSL
                                  # llvmpipe ICD used for physx_cuda cannot provide. Turn video
                                  # capture off; success/return are logged from raw obs anyway.
