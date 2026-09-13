@@ -15,7 +15,7 @@ from herp.experiment_protocol import balanced_order
 ROOT=Path(__file__).resolve().parents[1]
 
 
-def make_jobs(phase,tasks,seeds,budget,python,td_python,out):
+def make_jobs(phase,tasks,seeds,budget,python,td_python,out,num_envs_ppo=512,num_envs_sac_native=16):
     methods=[('PPO','ppo',2017),('SAC','sac',2018),('MBRL','tdmpc2',2024)] if phase=='pilot' else [
         ('PPO','herp',2026),('SAC','sac_herp',2026),('MBRL','tdmpc2',2024),('PPO','ppo',2017),('SAC','sac',2018)]
     variants=[{}]
@@ -31,14 +31,40 @@ def make_jobs(phase,tasks,seeds,budget,python,td_python,out):
                     suffix=''.join(f'-{k}-{v}' for k,v in variant.items())
                     run=out/phase/family/task/f'{method}{suffix}-seed{seed}'
                     if family=='PPO':
+                        # ALL PPO methods (vanilla + HERP + intrinsic + revisit)
+                        # run vectorized on GPU. HERP-PPO's VectorPartitionObserver
+                        # + VectorFragmentCollector handle parallel restore/observe;
+                        # forcing num_envs=1 (as SAC does) would make HERP-PPO
+                        # ~500x slower AND change its batch statistics vs vanilla
+                        # PPO — breaking the same-backbone causal comparison.
                         cmd=[python,str(ROOT/'scripts/train_v3.py'),'--method',method,'--phase',phase,
-                             '--wandb-mode','online','--wandb-project','herp-framework','--eval-episodes','10','--eval-interval','50000']
+                             '--num-envs',str(num_envs_ppo),'--num-eval-envs','16',
+                             '--wandb-mode','online','--wandb-project','herp-framework',
+                             '--eval-episodes','10','--eval-interval','50000']
                     elif family=='SAC':
-                        cmd=[python,str(ROOT/'scripts/train_herp_sac.py'),'--method',method,'--phase',phase,
-                             '--eval-episodes','10','--eval-freq','50000']
+                        # HERP-SAC requires serial acquisition (num_envs=1);
+                        # vanilla SAC pilots use the native ManiSkill SAC
+                        # (num_envs_sac_native=16) so we can actually
+                        # observe saturation within a working day.
+                        if method=='sac' and phase=='pilot':
+                            cmd=[python,str(ROOT/'scripts/sac_official.py'),
+                                 '--phase',phase,'--num-envs',str(num_envs_sac_native),
+                                 '--num-eval-envs','8','--track','--wandb-project-name','herp-framework',
+                                 '--eval-freq','25','--log-freq','10000']
+                        else:
+                            cmd=[python,str(ROOT/'scripts/train_herp_sac.py'),'--method',method,'--phase',phase,
+                                 '--eval-episodes','10','--eval-freq','50000']
                     else:
                         cmd=[td_python,str(ROOT/'scripts/tdmpc2_official.py'),'--phase',phase,'--eval-episodes','10','--eval-interval','50000']
-                    cmd+=['--env-id',task,'--seed',str(seed),'--total-timesteps',str(budget),'--output-dir',str(run)]
+                    # PPO/SAC vector envs require budget divisible by num_envs;
+                    # round up to preserve headroom rather than truncate.
+                    per_run_budget=budget
+                    if family=='PPO':
+                        n=1 if method.startswith('herp') else num_envs_ppo
+                        per_run_budget=-(-budget//n)*n
+                    elif family=='SAC' and method=='sac' and phase=='pilot':
+                        per_run_budget=-(-budget//num_envs_sac_native)*num_envs_sac_native
+                    cmd+=['--env-id',task,'--seed',str(seed),'--total-timesteps',str(per_run_budget),'--output-dir',str(run)]
                     for k,v in variant.items():cmd += ['--'+k.replace('_','-'),str(v)]
                     jobs.append(dict(family=family,method=method,year=year,difficulty=difficulty,task=task,seed=seed,
                                      phase=phase,variant=variant,output_dir=str(run),command=cmd,status='pending'))
