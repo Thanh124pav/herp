@@ -72,7 +72,6 @@ etils==1.14.0
 evaluate==0.4.6
 evdev==1.9.3
 executing==2.2.1
-experience-routing==0.1.0
 Farama-Notifications==0.0.6
 fastapi==0.136.3
 fastapi-cli==0.0.24
