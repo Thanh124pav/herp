@@ -1,4 +1,4 @@
-"""Reproducible CPU ManiSkill HERP-v3 pilot; identical existing PPO optimizer."""
+"""Reproducible HERP-v3 training — supports ManiSkill (GPU) and DMC/MetaWorld (CPU)."""
 from __future__ import annotations
 import argparse
 from collections import defaultdict,deque
@@ -19,7 +19,7 @@ from herp.sigma import direct_q_estimate,root_total_variance
 from herp.allocator import v3_priority_distribution,allocate_fragments
 from herp.acquisition import AcquisitionJob,AcquisitionScheduler,FragmentCollector,concatenate_batches
 from herp.gradient_signature import policy_gradient_signature
-from herp.envs.maniskill import ManiSkillAdapter
+from herp.envs import make_adapter
 from herp.baselines import RND,Disagreement
 
 METHODS=['ppo','rnd','disagreement','uniform','state_radius_uniform','state_radius_psigma',
@@ -80,9 +80,12 @@ def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--phase',choices=['pilot','ablation','performance','smoke'],default='pilot')
     p.add_argument('--method',choices=METHODS,default='herp')
+    p.add_argument('--benchmark',default='maniskill',choices=['maniskill','dmc','metaworld'])
     p.add_argument('--env-id',default='PickCube-v1'); p.add_argument('--seed',type=int,default=0)
     p.add_argument('--total-timesteps',type=int,default=65536)
     p.add_argument('--batch-size',type=int,default=1024)
+    p.add_argument('--num-minibatches',type=int,default=0,
+                   help='override PPO num_minibatches (0=use Args default 32)')
     p.add_argument('--num-envs',type=int,default=1)
     p.add_argument('--reference-slots',type=int,default=16)
     p.add_argument('--num-eval-envs',type=int,default=16)
@@ -97,7 +100,7 @@ def main(argv=None):
     p.add_argument('--score-normalize',choices=['none','rank','zscore'],default='rank',
                    help='p and sigma live on incompatible scales; rank-normalize each to [0,1] before multiplying')
     p.add_argument('--score-temperature',type=float,default=1.0)
-    p.add_argument('--root-floor',type=float,default=0.0,
+    p.add_argument('--root-floor',type=float,default=0.15,
                    help='EXPERIMENTS §26 V1: guarantee n_0 >= root_floor of budget')
     p.add_argument('--uniform-mix',type=float,default=0.0,
                    help='EXPERIMENTS §26 V2: convex mix priority distribution with uniform')
@@ -105,6 +108,8 @@ def main(argv=None):
                    help='exact checkpoint path; use --auto-resume to pick latest automatically')
     p.add_argument('--auto-resume',action='store_true',
                    help='if set, load the newest checkpoint_*.pt in --output-dir when --resume-from is empty')
+    p.add_argument('--fresh-wandb-run',action='store_true',
+                   help='resume training state but start a new W&B run (for protocol-clean recovery)')
     p.add_argument('--checkpoint-interval',type=int,default=16384)
     p.add_argument('--wandb-mode',choices=['disabled','offline','online'],default='disabled')
     p.add_argument('--wandb-project',default='herp-v3')
@@ -144,16 +149,26 @@ def main(argv=None):
     # server's hyperparams for the "1M steps reach ~100% success" report to
     # replicate. Notably num_minibatches stays at the upstream default (32);
     # a prior override to 8 caused PPO to collapse at ~1.4M steps.
-    ppo=Args(num_envs=args.num_envs,
-             num_steps=cfg.future_horizon if args.num_envs>1 else args.batch_size,
-             device='cuda' if args.num_envs>1 else 'cpu',
-             sim_backend='physx_cuda' if args.num_envs>1 else 'physx_cpu')
     vector=args.num_envs>1
-    device='cuda' if vector else 'cpu';sim='physx_cuda' if vector else 'physx_cpu'
+    if args.benchmark=='maniskill':
+        device='cuda' if vector else 'cpu';sim='physx_cuda' if vector else 'physx_cpu'
+        env_kw=dict(benchmark='maniskill',env_id=args.env_id,control_mode=args.control_mode,
+                    obs_mode=args.obs_mode,reward_mode=args.reward_mode,sim_backend=sim,render_backend='cpu',device=device)
+        eval_kw=dict(**env_kw,ignore_terminations=True)
+    else:
+        device='cpu';sim='cpu'
+        env_kw=dict(benchmark=args.benchmark,env_id=args.env_id,device=device)
+        if args.benchmark=='metaworld':env_kw['reward_mode']=args.reward_mode
+        eval_kw=dict(**env_kw)
+    ppo_kw=dict(num_envs=args.num_envs,
+                num_steps=cfg.future_horizon if vector else args.batch_size,
+                device=device,sim_backend=sim if args.benchmark=='maniskill' else 'cpu')
+    if args.num_minibatches>0:ppo_kw['num_minibatches']=args.num_minibatches
+    ppo=Args(**ppo_kw)
     if vector and args.total_timesteps%args.num_envs:raise ValueError('Vector budget must be divisible by num_envs')
-    env=ManiSkillAdapter(args.env_id,control_mode=args.control_mode,obs_mode=args.obs_mode,reward_mode=args.reward_mode,sim_backend=sim,render_backend='cpu',device=device).make(args.num_envs,args.seed)
+    env=make_adapter(**env_kw).make(args.num_envs,args.seed)
     env.reset(seed=args.seed)
-    eval_env=ManiSkillAdapter(args.env_id,control_mode=args.control_mode,obs_mode=args.obs_mode,reward_mode=args.reward_mode,sim_backend=sim,render_backend='cpu',device=device,ignore_terminations=True).make(args.num_eval_envs if vector else 1,args.seed+10000)
+    eval_env=make_adapter(**eval_kw).make(args.num_eval_envs if vector else 1,args.seed+10000)
     agent=Agent(env.obs_dim,env.action_dim).to(device);optimizer=torch.optim.Adam(agent.parameters(),lr=ppo.learning_rate,eps=1e-5)
     normalizer=RunningFeatureNormalizer(eps=1e-3)
     archive=RegionArchive(cfg.max_snapshots_per_region,args.seed);archive.ensure_root()
@@ -179,7 +194,7 @@ def main(argv=None):
         normalizer=state['normalizer'];archive=state['archive'];predictor=state['predictor']
         observer=state['observer'];observer.adapter=env;observer.archive=archive;observer.regionizer.archive=archive
         collector.normalizer=normalizer;collector.counters=state['counters'];collector.fragment_id=state['fragment_id']
-        collector.observer=observer;scheduler.archive=archive
+        collector.observer=None if ordinary else observer;scheduler.archive=archive
         for rid,fs in state['sigma_cache'].items():cache[rid].extend(fs)
         for rid,fs in state.get('child_mean_cache',{}).items():child_mean_cache[rid].extend(fs)
         value_observations=state.get('value_observations',{})
@@ -188,7 +203,7 @@ def main(argv=None):
         random.setstate(state['python_rng']);np.random.set_state(state['numpy_rng']);torch.set_rng_state(state['torch_rng']);generator.set_state(state['allocator_rng'])
         if intrinsic:
             intrinsic.load_state_dict(state['intrinsic']);intrinsic_optimizer.load_state_dict(state['intrinsic_optimizer'])
-        wandb_run_id_from_ckpt=state.get('wandb_run_id')
+        wandb_run_id_from_ckpt=None if args.fresh_wandb_run else state.get('wandb_run_id')
     if (out/'summary.json').exists() and not args.resume_from:
         print(json.dumps({'skip':True,'reason':'summary.json already present','output_dir':str(out)}),flush=True)
         return
@@ -218,8 +233,16 @@ def main(argv=None):
     json_write(out/'source_hashes.json',{str(f.relative_to(source_root)):hashlib.sha256(f.read_bytes()).hexdigest() for f in source_files})
     with tarfile.open(out/'source.tar.gz','w:gz') as tar:
         for f in source_files:tar.add(f,arcname=str(f.relative_to(source_root)))
+    pkg_list=['torch','numpy']
+    if args.benchmark=='maniskill':pkg_list+=['mani-skill','sapien','gymnasium']
+    elif args.benchmark=='dmc':pkg_list+=['dm_control','mujoco']
+    elif args.benchmark=='metaworld':pkg_list+=['metaworld','mujoco','gymnasium']
+    pkg_versions={}
+    for x in pkg_list:
+        try:pkg_versions[x]=md.version(x)
+        except Exception:pkg_versions[x]='N/A'
     json_write(out/'provenance.json',dict(python=sys.executable,git_sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
-        packages={x:md.version(x) for x in ['torch','mani-skill','sapien','gymnasium','numpy']},
+        packages=pkg_versions,benchmark=args.benchmark,
         normalization='running; centroids and cached futures rebased together each round',sim_backend=sim,
         source_snapshot='source.tar.gz',root_total_variance='child-entry proxy; direct root logged separately',
         sacl_style='value change on fixed archived representative state; uncertainty coefficient zero'))
@@ -396,12 +419,17 @@ def main(argv=None):
         losses=ppo_update(agent,optimizer,merged,ppo);version+=1
         update_seconds=time.time()-update_start
         assert collector.total_steps<=args.total_timesteps
+        allocation_entropy_raw=float(-torch.special.xlogy(probs,probs.clamp_min(1e-12)).sum())
+        eligible_regions=int(probs.numel())
+        allocation_entropy=(allocation_entropy_raw/math.log(eligible_regions)
+                            if eligible_regions>1 else 0.0)
         record=dict(type='training',step=collector.total_steps,policy_version=version,method=args.method,
             wall_seconds=time.time()-started,collection_seconds=collection_seconds,processing_seconds=processing_seconds,update_seconds=update_seconds,budget=collector.counters.copy(),num_regions=len(archive),
             num_chains=observer.chains,predictor_labels=len(predictor.y),activation_step=activation,
             root_direct=archive.regions[0].q_direct,root_total_variance=root_q,root_missing_child_means=missing_root_means,
             root_fraction=allocations.get(0,0)/max(1,sum(allocations.values())),
-            allocation_entropy=float(-torch.special.xlogy(probs,probs.clamp_min(1e-12)).sum()),
+            eligible_regions=eligible_regions,allocation_entropy=allocation_entropy,
+            allocation_entropy_raw=allocation_entropy_raw,
             losses=losses)
         metrics_file.write(json.dumps(record)+'\n')
         for r in archive:

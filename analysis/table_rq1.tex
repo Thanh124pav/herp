@@ -1,0 +1,93 @@
+% RQ1 Main Performance Table — auto-generated, peak performance
+% Last updated: 2026-09-15 (refresh 4)
+%
+% Requires: \usepackage{multirow,booktabs,xcolor}
+%   \newcommand{\tbd}{\textcolor{gray}{--}}
+%   \newcommand{\NA}{\textcolor{gray}{n/a}}
+%   \newcommand{\herp}{\textsc{Herp}}
+%
+% SAC+HERP uses root_floor=0.50 (corrected from 0.15).
+% $^\dag$ = fewer than 3 seeds completed.
+
+\begin{table*}[t]
+\centering
+\caption{RQ1: Peak performance at the fixed interaction budget.
+  Manipulation columns report peak success rate (\%);
+  DMC columns report peak episodic return.
+  Cells show mean $\pm$ std across seeds.
+  \textbf{Bold} marks the best method within each backbone group.
+  $^\dag$~fewer than 3 seeds completed.}
+\label{tab:rq1}
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llccccc}
+\toprule
+Backbone & Method
+  & PickCube $\uparrow$
+  & LiftPeg $\uparrow$
+  & ButtonPress $\uparrow$
+  & Walker Run $\uparrow$
+  & Cheetah Run $\uparrow$ \\
+\midrule
+\multirow{4}{*}{PPO}
+  & PPO
+    & \textbf{63 $\pm$ 27}
+    & 7 $\pm$ 6
+    & 83 $\pm$ 29
+    & 45 $\pm$ 3
+    & 85 $\pm$ 14 \\
+  & + RND
+    & 34 $\pm$ 15
+    & 12 $\pm$ 7
+    & \textbf{100 $\pm$ 0}
+    & \textbf{48 $\pm$ 3}
+    & 91 $\pm$ 22 \\
+  & + Disagreement
+    & 34 $\pm$ 31
+    & 3 $\pm$ 5
+    & \textbf{100 $\pm$ 0}
+    & 46 $\pm$ 5
+    & \textbf{101 $\pm$ 8} \\
+  & + \herp{}
+    & 43 $\pm$ 13$^\dag$
+    & \textbf{20 $\pm$ 16}
+    & 100$^\dag$
+    & 35 $\pm$ 3
+    & 83 $\pm$ 13 \\
+\midrule
+\multirow{3}{*}{SAC}
+  & SAC
+    & \tbd
+    & \tbd
+    & \tbd
+    & 593 $\pm$ 108
+    & 577 $\pm$ 139 \\
+  & MaxInfoRL
+    & \NA
+    & \NA
+    & \NA
+    & \textbf{683 $\pm$ 19}
+    & \textbf{670 $\pm$ 36} \\
+  & SAC + \herp{}
+    & \tbd
+    & \tbd
+    & \tbd
+    & 547 $\pm$ 35
+    & 419$^\dag$ \\
+\midrule
+\multirow{2}{*}{MBRL}
+  & TD-MPC2
+    & \textbf{93 $\pm$ 12}
+    & 53 $\pm$ 58$^\dag$
+    & \NA
+    & \NA
+    & \NA \\
+  & TD-MPC2 + \herp{}
+    & \tbd
+    & 0$^\dag$
+    & \NA
+    & \NA
+    & \NA \\
+\bottomrule
+\end{tabular}}
+\end{table*}

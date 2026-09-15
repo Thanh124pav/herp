@@ -39,5 +39,5 @@ class HERPV3Config:
     # ordinary candidate", THEORY §13) is the main-method behavior. Set nonzero
     # to test V1 (hard root lower bound n_0 >= root_floor) or V2 (mix priority
     # with uniform to prevent starvation of cold regions AND root).
-    root_floor: float = 0.0  # min fraction of allocation reserved for region 0
+    root_floor: float = 0.15  # min fraction of allocation reserved for region 0
     uniform_mix: float = 0.0  # convex mix weight with uniform over all regions

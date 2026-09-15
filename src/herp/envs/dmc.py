@@ -165,6 +165,16 @@ class DMCAdapter(EnvAdapter):
         obs_np, info = serial_reset(self._state, _obs_to_flat)
         return torch.as_tensor(obs_np, device=self.device).float(), info
 
+    def reset_indices(self, env_ids: torch.Tensor):
+        ids = torch.as_tensor(env_ids, dtype=torch.long, device="cpu").tolist()
+        obs_all = torch.zeros(self.num_envs, self.obs_dim, device=self.device)
+        for i in ids:
+            obs, _ = self._state.envs[i].reset()
+            self._state.last_obs[i] = obs
+            self._state.elapsed[i] = 0
+            obs_all[i] = torch.as_tensor(_obs_to_flat(obs), device=self.device).float()
+        return obs_all, {}
+
     def step(self, actions: torch.Tensor):
         obs_np, rew, term, trunc, info = serial_step(
             self._state, actions, _obs_to_flat, self.max_episode_steps

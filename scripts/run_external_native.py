@@ -29,11 +29,12 @@ def main():
     p.add_argument('--seed',type=int,default=0)
     p.add_argument('--env-steps',type=int,default=100000)
     p.add_argument('--output-dir',type=Path,required=True)
+    p.add_argument('--wandb-project',default='herp-framework')
     p.add_argument('--prepare-only',action='store_true')
     a=p.parse_args();repo,entry=verify(a.method);out=a.output_dir.resolve();out.mkdir(parents=True,exist_ok=True)
     if a.method=='BRO':
         source=(repo/'train_parallel.py').read_text()
-        source=source.replace("entity='naumix',",'entity=None,').replace("project='BRO',","project='herp-framework',")
+        source=source.replace("entity='naumix',",'entity=None,').replace("project='BRO',",f"project={a.wandb_project!r},")
         source=source.replace("save_dir = f'./results/{FLAGS.env_name}_RR{str(FLAGS.updates_per_step)}/'",'save_dir = FLAGS.save_dir')
         script=out/'native_train.py';script.write_text(source)
         cmd=[sys.executable,str(script),'--benchmark=dmc',f'--env_name={a.task}',f'--seed={a.seed}',
@@ -52,6 +53,8 @@ def main():
         def step(self, action):
             self.raw_steps += 1
             return super().step(action)''')
+        native=native.replace("        project=project_name,\n", "        project=project_name,\n        name=f'{alg}-{domain_name}-s{seed}',\n", 1)
+        native=native.replace("    algorithm_kwargs = {\n", "    algorithm_kwargs = {\n        'device': 'cpu',\n", 1)
         native=native.replace('    algorithm.learn(', '''    algorithm.learn(''',1)
         marker='\n\ndef main(args):'
         extra='''
@@ -74,7 +77,7 @@ def main():
         native=native.replace(marker,extra+marker,1)
         snapshot=out/'experiment_native.py';snapshot.write_text(native)
         script.write_text('import sys\n'+f'sys.path.insert(0,{str(out)!r})\n'+
-          'from experiment_native import experiment\n'+f'experiment(alg="maxinfosac",domain_name={a.task!r},logs_dir={str(out)+"/"!r},project_name="herp-framework",total_steps={a.env_steps//2},seed={a.seed},action_cost=0.0)\n')
+          'from experiment_native import experiment\n'+f'experiment(alg="maxinfosac",domain_name={a.task!r},logs_dir={str(out)+"/"!r},project_name={a.wandb_project!r},total_steps={a.env_steps//2},seed={a.seed},action_cost=0.0)\n')
         cmd=[sys.executable,str(script)]
     (out/'provenance.json').write_text(json.dumps(dict(**entry,requested_raw_env_steps=a.env_steps,
         note='BRO DMC uses one raw DMC step per action per seed; MaxInfoRL counts inner DMC steps explicitly',command=cmd),indent=2))

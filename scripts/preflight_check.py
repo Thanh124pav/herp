@@ -94,6 +94,7 @@ def config_consistency():
     assert cfg.boundary_lambda_policy == 1.0 and cfg.boundary_lambda_state == 0.0
     assert cfg.sigma_floor == 1e-3 and cfg.relevance_floor == 1e-3
     assert cfg.sigma_predictor_kappa == 8.0
+    assert cfg.root_floor == 0.15, f'root_floor {cfg.root_floor} != requested default 0.15'
     assert cfg.score_normalize in ('none', 'rank', 'zscore')
     return f'M={cfg.future_horizon}, radius={cfg.chain_radius}, norm={cfg.score_normalize}'
 

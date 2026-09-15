@@ -47,6 +47,7 @@ from herp.config import HERPV3Config
 from herp.envs.maniskill import ManiSkillAdapter
 from herp.learners.sac import SACLearner
 from herp.provenance import save_provenance
+from herp.vector_acquisition import VectorPartitionObserver
 
 
 @dataclass
@@ -207,6 +208,8 @@ def main():
                        max_regions=args.max_regions,
                        sigma_predictor_kappa=args.sigma_kappa)
     controller = AllocationController(env, cfg, args.seed, args.sigma_mode)
+    controller.observer = VectorPartitionObserver(
+        env, controller.archive, controller.normalizer, cfg)
 
     counts = dict(ROOT_ACQUISITION=0, REGION_ACQUISITION=0, REFERENCE=0)
     steps = version = eval_steps = 0
