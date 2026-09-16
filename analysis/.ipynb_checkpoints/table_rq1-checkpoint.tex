@@ -1,13 +1,12 @@
 % RQ1 Main Performance Table — auto-generated, peak performance
-% Last updated: 2026-09-15 (refresh 6)
+% Last updated: 2026-09-15
+% NOTE: Cheetah Run replaces Cartpole Sparse (not yet run)
 %
 % Requires: \usepackage{multirow,booktabs,xcolor}
+% Define these in your preamble (or remove if already defined):
 %   \newcommand{\tbd}{\textcolor{gray}{--}}
 %   \newcommand{\NA}{\textcolor{gray}{n/a}}
 %   \newcommand{\herp}{\textsc{Herp}}
-%
-% SAC+HERP uses root_floor=0.50 (corrected from 0.15).
-% $^\dag$ = fewer than 3 seeds completed.
 
 \begin{table*}[t]
 \centering
@@ -31,63 +30,75 @@ Backbone & Method
 \midrule
 \multirow{4}{*}{PPO}
   & PPO
-    & \textbf{63 $\pm$ 27}
-    & 7 $\pm$ 6
-    & 83 $\pm$ 29
-    & 45 $\pm$ 3
-    & 85 $\pm$ 14 \\
+    & \textbf{63 $\pm$ 22}
+    & 7 $\pm$ 5
+    & 83 $\pm$ 24
+    & \textbf{43 $\pm$ 5}
+    & 52 $\pm$ 12 \\
   & + RND
-    & 34 $\pm$ 15
-    & 12 $\pm$ 7
+    & 34 $\pm$ 12
+    & 12 $\pm$ 6
     & \textbf{100 $\pm$ 0}
-    & \textbf{48 $\pm$ 3}
-    & 91 $\pm$ 22 \\
+    & 43 $\pm$ 5
+    & 51 $\pm$ 23 \\
   & + Disagreement
-    & 34 $\pm$ 31
-    & 3 $\pm$ 5
+    & 34 $\pm$ 25
+    & 3 $\pm$ 4
     & \textbf{100 $\pm$ 0}
-    & 46 $\pm$ 5
-    & \textbf{101 $\pm$ 8} \\
+    & \textbf{43 $\pm$ 7}
+    & \textbf{64 $\pm$ 19} \\
   & + \herp{}
-    & 43 $\pm$ 13$^\dag$
-    & \textbf{20 $\pm$ 16}
+    & 52$^\dag$
+    & \textbf{20 $\pm$ 13}
     & 100$^\dag$
-    & 35 $\pm$ 3
-    & 83 $\pm$ 13 \\
+    & 35 $\pm$ 2
+    & 50 $\pm$ 20 \\
 \midrule
-\multirow{3}{*}{SAC}
+\multirow{5}{*}{SAC}
   & SAC
     & \tbd
     & \tbd
-    & 50 $\pm$ 71$^\dag$
-    & 593 $\pm$ 108
-    & 577 $\pm$ 139 \\
+    & \tbd
+    & 574 $\pm$ 91
+    & 577 $\pm$ 120 \\
+  & RFCL
+    & \tbd
+    & \tbd
+    & \NA
+    & \NA
+    & \NA \\
   & MaxInfoRL
     & \NA
     & \NA
     & \NA
-    & \textbf{683 $\pm$ 19}
-    & \textbf{670 $\pm$ 36} \\
+    & \textbf{696 $\pm$ 17}
+    & \textbf{685 $\pm$ 37} \\
+  & BRO
+    & \NA
+    & \NA
+    & \tbd
+    & \tbd
+    & \tbd \\
   & SAC + \herp{}
     & \tbd
     & \tbd
-    & 50 $\pm$ 71$^\dag$
-    & 555 $\pm$ 30
-    & 316 $\pm$ 128 \\
+    & \tbd
+    & 462 $\pm$ 83
+    & 446 $\pm$ 4$^\dag$ \\
 \midrule
 \multirow{2}{*}{MBRL}
   & TD-MPC2
-    & \textbf{93 $\pm$ 12}
-    & 56 $\pm$ 62$^\dag$
-    & \NA
-    & \NA
-    & \NA \\
+    & \textbf{93 $\pm$ 9}
+    & \tbd
+    & \tbd
+    & \tbd
+    & \tbd \\
   & TD-MPC2 + \herp{}
-    & 18$^\dag$
-    & \textbf{94}$^\dag$
-    & \NA
-    & \NA
-    & \NA \\
+    & 64$^\dag$
+    & \tbd
+    & \tbd
+    & \tbd
+    & \tbd \\
 \bottomrule
 \end{tabular}}
 \end{table*}
