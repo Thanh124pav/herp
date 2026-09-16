@@ -28,11 +28,13 @@ import os
 import random
 import sys
 import time
+from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
-os.environ.setdefault("VK_ICD_FILENAMES", "/usr/share/vulkan/icd.d/lvp_icd.json")
+os.environ.setdefault("VK_ICD_FILENAMES", "/etc/vulkan/icd.d/nvidia_icd.json")
 
 import numpy as np
 import torch
@@ -217,6 +219,58 @@ def main():
     next_checkpoint = args.checkpoint_interval
     started = time.time()
     learning = False
+
+    if args.resume_from:
+        resume_path = Path(args.resume_from).resolve()
+        learner_path = Path(str(resume_path) + ".learner.pt")
+        if not resume_path.is_file() or not learner_path.is_file():
+            raise FileNotFoundError(
+                f"Resume requires {resume_path} and {learner_path}")
+        # These are checkpoints produced by save_checkpoint() below. Keep the
+        # restricted unpickler enabled and allow only the repository-owned
+        # controller graph plus the small set of standard containers it uses.
+        from herp.archive import Region, RegionArchive
+        from herp.chain_features import RunningFeatureNormalizer
+        from herp.chain_partition import ChainRegionizer
+        from herp.envs.maniskill import ManiSkillSnapshot
+        from herp.region_graph import RegionGraph
+        from herp.sigma_predictor import LinearVariancePredictor
+        safe = [
+            AllocationController, VectorPartitionObserver, HERPV3Config,
+            Region, RegionArchive, Snapshot, RunningFeatureNormalizer,
+            ChainRegionizer, RegionGraph, LinearVariancePredictor,
+            ManiSkillSnapshot, defaultdict, deque, partial, torch.Generator,
+            np.ndarray, np.dtype, np._core.multiarray._reconstruct,
+            type(np.dtype(np.float32)), type(np.dtype(np.float64)),
+            type(np.dtype(np.int64)), type(np.dtype(np.uint32)),
+            type(np.dtype(object)),
+        ]
+        with torch.serialization.safe_globals(safe):
+            state = torch.load(resume_path, map_location="cpu", weights_only=True)
+        saved_args = state.get("args", {})
+        for key in ("env_id", "method", "seed", "num_envs"):
+            if saved_args.get(key) != getattr(args, key):
+                raise ValueError(
+                    f"Resume mismatch for {key}: checkpoint={saved_args.get(key)!r}, "
+                    f"requested={getattr(args, key)!r}")
+        learner.load(learner_path)
+        controller = state["controller"]
+        controller.adapter = env
+        controller.observer.adapter = env
+        steps = int(state["steps"])
+        version = int(state["version"])
+        eval_steps = int(state["eval_steps"])
+        learning = bool(state["learning"])
+        counts = dict(state["counts"])
+        random.setstate(state["python_rng"])
+        np.random.set_state(state["numpy_rng"])
+        if args.total_timesteps <= steps:
+            raise ValueError(
+                f"total_timesteps ({args.total_timesteps}) must exceed resumed step {steps}")
+        next_eval = ((steps // args.eval_freq) + 1) * args.eval_freq
+        next_checkpoint = ((steps // args.checkpoint_interval) + 1) * args.checkpoint_interval
+        print(json.dumps(dict(type="resume", checkpoint=str(resume_path),
+                              step=steps, target=args.total_timesteps)), flush=True)
 
     run = None
     if args.wandb_mode != "disabled":

@@ -103,7 +103,11 @@ class SACLearner:
         torch.save(state,path)
 
     def load(self,path):
-        state=torch.load(path,weights_only=False,map_location=self.device)
+        # RegionReplay is the only non-tensor object in learner checkpoints.
+        # Keep PyTorch's restricted weights-only unpickler enabled and
+        # allowlist only this repository-owned container.
+        with torch.serialization.safe_globals([RegionReplay]):
+            state=torch.load(path,weights_only=True,map_location=self.device)
         for k in ('actor','qf1','qf2','qf1_target','qf2_target','q_optimizer','actor_optimizer','a_optimizer'):
             getattr(self,k).load_state_dict(state[k])
         with torch.no_grad():self.log_alpha.copy_(state['log_alpha'])
