@@ -58,7 +58,7 @@ def serial_step(
 ):
     """Step every env with a per-env action row; auto-reset on episode end."""
     acts = actions.detach().cpu().numpy()
-    obs_list, rew, term, trunc, info_list = [], [], [], [], []
+    obs_list, final_obs_list, rew, term, trunc, info_list = [], [], [], [], [], []
     for i, env in enumerate(state.envs):
         obs, reward, terminated, truncated, info = env.step(acts[i])
         state.elapsed[i] += 1
@@ -66,7 +66,9 @@ def serial_step(
         if int(state.elapsed[i]) >= max_ep:
             truncated = True
         state.last_obs[i] = obs
-        obs_list.append(obs_fn(obs))
+        actual_obs = obs_fn(obs)
+        obs_list.append(actual_obs)
+        final_obs_list.append(actual_obs)
         rew.append(float(reward))
         term.append(bool(terminated))
         trunc.append(bool(truncated))
@@ -80,7 +82,7 @@ def serial_step(
         np.array(rew, dtype=np.float32),
         np.array(term, dtype=bool),
         np.array(trunc, dtype=bool),
-        {"per_env": info_list},
+        {"per_env": info_list, "final_observation": np.stack(final_obs_list, axis=0)},
     )
 
 

@@ -3,6 +3,38 @@ from __future__ import annotations
 import torch
 
 
+def fragment_ends_episode(fragment) -> bool:
+    """Whether the last real transition terminates or truncates an episode."""
+
+    if len(fragment.rewards) == 0:
+        return False
+    return bool(fragment.terminated[-1] | fragment.truncated[-1])
+
+
+def sigma_fragment_eligible(fragment, horizon: int) -> bool:
+    """Only complete windows and episode-ending fragments may label sigma."""
+
+    n = len(fragment.rewards)
+    return n == horizon or (n < horizon and fragment_ends_episode(fragment))
+
+
+def apply_terminal_noop_padding(fragment, state_dim: int, horizon: int) -> None:
+    """Turn an early episode end into a fixed window for sigma estimation.
+
+    The absorbing tail holds the final state fixed and applies a zero/no-op
+    normalized action. It affects only ``traj_features``/``valid_mask``;
+    PPO rewards, GAE, and transition batches retain their original length.
+    """
+
+    n = len(fragment.rewards)
+    if n == horizon:
+        fragment.valid_mask[:horizon] = True
+    elif 0 < n < horizon and fragment_ends_episode(fragment):
+        fragment.traj_features[n:horizon, :state_dim] = fragment.traj_features[n - 1, :state_dim]
+        fragment.traj_features[n:horizon, state_dim:] = 0
+        fragment.valid_mask[:horizon] = True
+
+
 def pairwise_sigma(features: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """sqrt(0.5 * mean pairwise squared distance), matching THEORY.md."""
 

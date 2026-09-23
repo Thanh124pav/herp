@@ -15,6 +15,7 @@ import torch
 from herp.allocation_controller import AllocationController
 from herp.config import HERPV3Config
 from herp.archive import Snapshot
+from herp.allocator import v3_priority_distribution
 
 
 class _StubAdapter:
@@ -213,3 +214,41 @@ def test_finish_round_survives_missing_reference_and_zero_fragments():
     assert learner.calls == []
     for r in controller.archive:
         assert math.isfinite(r.sigma_raw) and r.sigma_raw >= cfg.sigma_floor
+
+
+def _temporal_controller():
+    adapter = _StubAdapter();adapter.max_episode_steps=1000
+    cfg = HERPV3Config(future_horizon=32,min_non_root_regions=1,
+                       temporal_stratification=True,temporal_bins=3,
+                       temporal_exploration_mix=.15,temporal_min_measurements=3,
+                       relevance_threshold=.01,min_relevance_measurements=1,
+                       max_restart_fraction=1.,root_floor=0.)
+    controller = AllocationController(adapter,cfg,seed=4)
+    for elapsed in (10,450,800):
+        region=controller.archive.add_region(torch.zeros(6),step=elapsed)
+        region.snapshots.append(Snapshot({},torch.zeros(3),elapsed,
+                                         elapsed_steps=elapsed))
+        region.p_ema=.5;region.relevance_count=3;region.sigma_raw=1.
+    return controller,cfg
+
+
+def test_temporal_snapshot_sampling_adapts_without_starving_phases():
+    controller,cfg=_temporal_controller()
+    controller.temporal_p_ema[:]=[.08,.80,.18]
+    controller.temporal_relevance_count[:]=[10,10,10]
+    region_probs=v3_priority_distribution(controller.archive.regions,cfg,'herp')
+    phase_probs,candidates=controller.temporal_phase_distribution(region_probs)
+    assert phase_probs[1] > phase_probs[2] > phase_probs[0]
+    assert (phase_probs > 0).all(), 'exploration mix must prevent starvation'
+    assert all(candidates), 'all three temporal bins should remain available'
+    draws=torch.multinomial(phase_probs,4000,replacement=True,
+                            generator=torch.Generator().manual_seed(9))
+    counts=torch.bincount(draws,minlength=3)
+    assert counts[1] > counts[2] > counts[0] > 0
+
+
+def test_temporal_cold_start_is_balanced_but_not_forced_round_robin():
+    controller,cfg=_temporal_controller()
+    region_probs=v3_priority_distribution(controller.archive.regions,cfg,'herp')
+    phase_probs,_=controller.temporal_phase_distribution(region_probs)
+    torch.testing.assert_close(phase_probs,torch.full((3,),1/3,dtype=torch.float64))

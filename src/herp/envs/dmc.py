@@ -32,6 +32,7 @@ class DMCSnapshot:
     physics_state: np.ndarray
     time: float
     elapsed_steps: int = 0
+    step_count: int = 0
 
 
 def _obs_to_flat(obs) -> np.ndarray:
@@ -179,6 +180,12 @@ class DMCAdapter(EnvAdapter):
         obs_np, rew, term, trunc, info = serial_step(
             self._state, actions, _obs_to_flat, self.max_episode_steps
         )
+        # Keep the adapter contract tensor-only. serial_step stores the true
+        # terminal observation as NumPy because it is shared with raw Gym envs.
+        if "final_observation" in info:
+            info = dict(info)
+            info["final_observation"] = torch.as_tensor(
+                info["final_observation"], device=self.device).float()
         return (
             torch.as_tensor(obs_np, device=self.device).float(),
             torch.as_tensor(rew, device=self.device).float(),
@@ -196,6 +203,7 @@ class DMCAdapter(EnvAdapter):
             physics_state=np.array(physics.get_state(), dtype=np.float64, copy=True),
             time=float(physics.time()),
             elapsed_steps=int(self._state.elapsed[i]),
+            step_count=int(getattr(env._env, "_step_count", 0)),
         )
 
     def save_state(self, env_ids: torch.Tensor) -> list[DMCSnapshot]:
@@ -213,6 +221,8 @@ class DMCAdapter(EnvAdapter):
         obs = env._env.task.get_observation(physics)
         env._last_obs = obs
         self._state.last_obs[i] = obs
+        if hasattr(env._env, "_step_count"):
+            env._env._step_count = int(getattr(snap, "step_count", snap.elapsed_steps))
         self._state.elapsed[i] = int(snap.elapsed_steps)
         return _obs_to_flat(obs)
 

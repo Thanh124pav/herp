@@ -6,7 +6,8 @@ from herp.config import HERPV3Config
 from herp.archive import RegionArchive
 from herp.chain_features import RunningFeatureNormalizer,symmetric_gaussian_kl,diagonal_gaussian_kl,chain_entry_distance
 from herp.chain_partition import BoundaryDetector,ChainRegionizer,Chain
-from herp.sigma import direct_q_estimate,full_window_q,root_total_variance
+from herp.sigma import (apply_terminal_noop_padding,direct_q_estimate,
+                        full_window_q,root_total_variance,sigma_fragment_eligible)
 from herp.sigma_predictor import LinearVariancePredictor,combined_q
 from herp.allocator import v3_priority_distribution,allocate_fragments
 from herp.acquisition import AcquisitionScheduler,RolloutFragment
@@ -67,6 +68,33 @@ def test_sigma_unbiased_known_distribution_and_fast_equivalence():
     assert abs(float(estimates.mean())-14.)<.25
     fs=[fragment(f) for f in x[0]]
     assert abs(direct_q_estimate(fs)[0]-full_window_q(x[0]))<1e-5
+
+
+def test_sigma_accepts_only_full_or_episode_end_and_pads_terminal_as_noop():
+    def rollout(n,terminated=False,truncated=False):
+        term=torch.zeros(n,dtype=torch.bool);trunc=torch.zeros(n,dtype=torch.bool)
+        term[-1]=terminated;trunc[-1]=truncated
+        features=torch.zeros(4,3);features[:n]=torch.tensor([[1.,2.,.5],[3.,4.,.7]])[:n]
+        return SimpleNamespace(rewards=torch.zeros(n),terminated=term,truncated=trunc,
+                               traj_features=features,valid_mask=torch.arange(4)<n)
+
+    incomplete=rollout(2)
+    assert not sigma_fragment_eligible(incomplete,4)
+    apply_terminal_noop_padding(incomplete,2,4)
+    assert incomplete.valid_mask.tolist()==[True,True,False,False]
+
+    terminal=rollout(2,terminated=True)
+    assert sigma_fragment_eligible(terminal,4)
+    apply_terminal_noop_padding(terminal,2,4)
+    assert terminal.valid_mask.all()
+    torch.testing.assert_close(terminal.traj_features[2:,:2],torch.tensor([[3.,4.],[3.,4.]]))
+    torch.testing.assert_close(terminal.traj_features[2:,2],torch.zeros(2))
+
+    truncated=rollout(2,truncated=True)
+    assert sigma_fragment_eligible(truncated,4)
+    full=rollout(2,terminated=True);full.rewards=torch.zeros(4)
+    full.terminated=torch.zeros(4,dtype=torch.bool);full.truncated=torch.zeros(4,dtype=torch.bool)
+    assert sigma_fragment_eligible(full,4)
 
 
 def test_predictor_realizable_intercept_clipping_and_weights():
@@ -135,7 +163,7 @@ def test_root_floor_and_uniform_mix_v1_v2_ablations():
     # gives root a small share by default).
     regs = [SimpleNamespace(p_ema=p, sigma_raw=s)
             for p, s in [(0.05, 0.05), (0.9, 1.0), (0.8, 0.9), (0.7, 0.8), (0.6, 0.7)]]
-    base = HERPV3Config(score_normalize='rank')
+    base = HERPV3Config(score_normalize='rank',root_floor=0.)
     d0 = v3_priority_distribution(regs, base)
     assert d0[0].item() < 0.15, 'baseline root should get < 15% here'
     # V1: root_floor lifts the root allocation.
@@ -182,6 +210,26 @@ def test_allocator_survives_degenerate_signals():
     d=v3_priority_distribution(regs,cfg)
     assert torch.isfinite(d).all() and (d>=0).all()
     torch.testing.assert_close(d.sum(),torch.tensor(1.,dtype=torch.float64))
+
+
+def test_sac_relevance_gate_returns_rejected_mass_to_root():
+    cfg=HERPV3Config(score_normalize='rank',relevance_threshold=.03,
+                     min_relevance_measurements=2,max_restart_fraction=.35,
+                     root_floor=0.)
+    regs=[SimpleNamespace(p_ema=0.,sigma_raw=.1,relevance_count=99),
+          SimpleNamespace(p_ema=.02,sigma_raw=10.,relevance_count=9),
+          SimpleNamespace(p_ema=.20,sigma_raw=1.,relevance_count=1),
+          SimpleNamespace(p_ema=.20,sigma_raw=1.,relevance_count=3)]
+    d=v3_priority_distribution(regs,cfg)
+    assert d[1] == 0, 'below-threshold p must be exactly zero after ranking'
+    assert d[2] == 0, 'insufficiently measured p must be exactly zero'
+    assert 0 < d[3] <= .35
+    torch.testing.assert_close(d[0]+d[3],torch.tensor(1.,dtype=torch.float64))
+
+    for r in regs[1:]:
+        r.p_ema=0.;r.relevance_count=99
+    fallback=v3_priority_distribution(regs,cfg)
+    torch.testing.assert_close(fallback,torch.tensor([1.,0.,0.,0.],dtype=torch.float64))
 
 
 def test_fragment_gae_bootstraps_but_does_not_cross_jobs():

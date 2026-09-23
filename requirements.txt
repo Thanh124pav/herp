@@ -45,7 +45,7 @@ gymnasium-robotics==1.4.2  # for FetchPush-v4 / FetchPickAndPlace-v4
 # Finger-Turn-Hard, Hopper-Hop, Walker-Run, Quadruped-Run, Humanoid-Walk).
 # `shimmy` wraps DMC to expose a Gymnasium-compatible API so HERP's adapter
 # base class can consume it without a bespoke DMC path.
-dm-control==1.0.24
+dm-control==1.0.27
 shimmy[dm-control]==2.0.0
 # MyoSuite (EXPERIMENTS §9.2 appendix) is INTENTIONALLY absent — myosuite <=
 # 2.9.x hard-pins gymnasium==0.29.1, which conflicts with mani-skill /

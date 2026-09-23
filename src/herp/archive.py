@@ -37,6 +37,7 @@ class Region:
     sigma_ema: float = 0.0
     p_raw: float = 0.0
     p_ema: float = 0.0
+    relevance_count: int = 0
     priority: float = 0.0
     gradient_norm: float = 0.0
     snapshot_count: int = 0
@@ -126,10 +127,25 @@ class RegionArchive:
             self.add_snapshot(int(rid), packaged)
 
     def sample_snapshot(self, region: Region) -> Snapshot:
+        snapshot, _ = self.sample_snapshot_with_index(region)
+        return snapshot
+
+    def sample_snapshot_with_index(self, region: Region) -> tuple[Snapshot, int]:
+        """Sample once and expose the selected index without a second RNG draw."""
         if not region.snapshots:
             raise ValueError(f"region {region.region_id} has no snapshots")
         idx = torch.randint(len(region.snapshots), (1,), generator=self._generator).item()
-        return region.snapshots[idx]
+        return region.snapshots[idx], int(idx)
+
+    def sample_snapshot_from_indices(
+        self, region: Region, indices: list[int]
+    ) -> tuple[Snapshot, int]:
+        """Uniformly sample one of an explicitly filtered set of snapshots."""
+        if not indices:
+            raise ValueError(f"region {region.region_id} has no eligible snapshots")
+        draw = int(torch.randint(len(indices), (1,), generator=self._generator).item())
+        index = int(indices[draw])
+        return region.snapshots[index], index
 
     def candidates(
         self,

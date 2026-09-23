@@ -111,7 +111,9 @@ def v3_priority_distribution(regions, cfg, mode='herp'):
         s_raw = torch.tensor([max(0., r.value_change) for r in regions], dtype=torch.float64)
     else:
         s_raw = None
-    p_norm = _normalize(p_raw + cfg.relevance_floor, cfg.score_normalize, cfg.relevance_floor)
+    threshold = float(getattr(cfg, 'relevance_threshold', 0.0))
+    p_effective = (p_raw - threshold).clamp_min(0.) if threshold > 0 else p_raw
+    p_norm = _normalize(p_effective + cfg.relevance_floor, cfg.score_normalize, cfg.relevance_floor)
     sigma_norm = _normalize(sigma_raw, cfg.score_normalize, cfg.sigma_floor)
     p_norm = (p_norm + cfg.relevance_floor).pow(cfg.relevance_alpha)
     if mode in ('uniform', 'state_radius_uniform'):
@@ -131,6 +133,30 @@ def v3_priority_distribution(regions, cfg, mode='herp'):
     if not len(scores) or not torch.isfinite(scores).all() or (scores < 0).any() or scores.sum() <= 0:
         raise ValueError('Allocation requires finite positive scores')
     probs = scores / scores.sum()
+
+    # Apply the SAC/MIRA relevance gate after rank normalization. Otherwise a
+    # zero/tied p value receives a positive rank and still consumes restarts.
+    # Rejected mass is returned to root instead of being redistributed among
+    # other restart regions.
+    gate_enabled = (threshold > 0 or
+                    int(getattr(cfg, 'min_relevance_measurements', 0)) > 0 or
+                    float(getattr(cfg, 'max_restart_fraction', 1.0)) < 1.0)
+    if gate_enabled and probs.numel() > 1 and mode in ('herp', 'herp_p'):
+        min_measurements = int(getattr(cfg, 'min_relevance_measurements', 0))
+        measured = torch.tensor([
+            int(getattr(r, 'relevance_count', 0)) >= min_measurements
+            for r in regions
+        ], dtype=torch.bool)
+        eligible = measured & (p_raw > threshold)
+        eligible[0] = False
+        accepted = probs * eligible.to(probs.dtype)
+        restart_mass = min(float(accepted.sum()),
+                           float(getattr(cfg, 'max_restart_fraction', 1.0)))
+        gated = torch.zeros_like(probs)
+        gated[0] = 1.0 - restart_mass
+        if restart_mass > 0:
+            gated[1:] = accepted[1:] / accepted[1:].sum() * restart_mass
+        probs = gated
     # EXPERIMENTS §26 V2: convex mix with uniform. Prevents rank-normalization
     # from starving any region (including root) below 1/N budget share.
     mix = float(getattr(cfg, 'uniform_mix', 0.0))

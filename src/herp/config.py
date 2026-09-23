@@ -27,6 +27,12 @@ class HERPV3Config:
     relevance_floor: float = 1e-3
     relevance_alpha: float = 1.
     relevance_mode: str = 'cosine'
+    # Optional SAC/MIRA safety gate. When enabled, non-root regions whose
+    # measured gradient alignment is below ``relevance_threshold`` receive
+    # exactly zero restart probability. Their mass returns to ordinary SAC.
+    relevance_threshold: float = 0.
+    min_relevance_measurements: int = 0
+    max_restart_fraction: float = 1.
     max_snapshots_per_region: int = 16
     min_non_root_regions: int = 8
     log_root_total_variance: bool = True
@@ -41,3 +47,10 @@ class HERPV3Config:
     # with uniform to prevent starvation of cold regions AND root).
     root_floor: float = 0.15  # min fraction of allocation reserved for region 0
     uniform_mix: float = 0.0  # convex mix weight with uniform over all regions
+    # Behavioral regions can contain snapshots from several episode phases.
+    # Temporal sampling is adaptive: most restart jobs follow measured phase
+    # relevance while a small uniform mixture prevents phase starvation.
+    temporal_stratification: bool = False
+    temporal_bins: int = 3
+    temporal_exploration_mix: float = .15
+    temporal_min_measurements: int = 3

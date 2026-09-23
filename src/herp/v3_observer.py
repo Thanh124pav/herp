@@ -19,6 +19,10 @@ class PartitionObserver:
         self.chains = 0
         self.completed_lengths = []
         self.events = []
+        # Optional in-memory handoff used only by diagnostic video capture.
+        # It is drained after every fragment and never written to JSON.
+        self.capture_provenance = False
+        self.snapshot_events = []
         self.path_source = 0
         self.is_root_start = True
 
@@ -65,6 +69,8 @@ class PartitionObserver:
             self.events.append(dict(step=step,region=self.current_region,policy_change=pc,state_change=sc,
                                     score=score,threshold=self.detector.threshold,elapsed=snap.elapsed_steps,
                                     fragment_start=old is None))
+            if self.capture_provenance:
+                self.snapshot_events.append((int(step), int(self.current_region), snap))
         self.chain_length += 1
         self.previous = (z,mu,logstd)
         return self.current_region
