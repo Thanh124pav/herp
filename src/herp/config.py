@@ -54,3 +54,4 @@ class HERPV3Config:
     temporal_bins: int = 3
     temporal_exploration_mix: float = .15
     temporal_min_measurements: int = 3
+    temporal_gate_temperature: float = .03

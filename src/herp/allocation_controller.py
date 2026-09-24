@@ -29,6 +29,7 @@ class AllocationController:
         self.temporal_attempts=[0 for _ in range(max(1, int(getattr(cfg, 'temporal_bins', 3))))]
         self.temporal_selected=[0 for _ in self.temporal_attempts]
         self.temporal_fallback_root=[0 for _ in self.temporal_attempts]
+        self.temporal_soft_fallback_root=0
         self.temporal_p_raw=[0. for _ in self.temporal_attempts]
         self.temporal_p_ema=[0. for _ in self.temporal_attempts]
         self.temporal_relevance_count=[0 for _ in self.temporal_attempts]
@@ -48,7 +49,9 @@ class AllocationController:
             return rid,self.archive.sample_snapshot(self.archive.regions[rid]),probs
 
         phase_probs, phase_candidates = self.temporal_phase_distribution(probs)
-        if phase_probs.sum() <= 0:
+        keep=float(phase_probs.sum())
+        if keep <= 0 or float(torch.rand((),generator=self.generator)) >= keep:
+            self.temporal_soft_fallback_root += 1
             fallback = torch.zeros_like(probs);fallback[0] = 1.
             return 0,None,fallback
         phase = int(torch.multinomial(phase_probs,1,generator=self.generator))
@@ -69,13 +72,13 @@ class AllocationController:
         return rid,snapshot,probs
 
     def temporal_phase_distribution(self, region_probs):
-        """Return adaptive phase probabilities and eligible region IDs.
+        """Return soft-gated phase probability mass and eligible region IDs.
 
-        Mature phases are weighted by positive gradient relevance above the
-        same hard threshold used by the region allocator. Cold phases are
-        optimistic until they have enough measurements. A small uniform
-        mixture over available phases prevents permanent starvation without
-        forcing equal early/middle/late allocation.
+        The returned probabilities need not sum to one. Their sum is the
+        probability of retaining a proposed non-root rollout; the remaining
+        mass falls back to root. Mature phases use a sigmoid gate around the
+        relevance threshold, so weak phases become rare but never permanently
+        lose the probes needed to recover as the policy changes.
         """
         bins=len(self.temporal_attempts)
         candidates=[[] for _ in range(bins)]
@@ -110,8 +113,18 @@ class AllocationController:
         adaptive=scores/scores.sum()
         uniform=available.to(torch.float64)/available.sum()
         explore=float(getattr(self.cfg,'temporal_exploration_mix',.15))
-        phase_probs=(1.-explore)*adaptive+explore*uniform
-        phase_probs=phase_probs/phase_probs.sum()
+        prior=(1.-explore)*adaptive+explore*uniform
+        temperature=max(
+            float(getattr(self.cfg,'temporal_gate_temperature',.03)),1e-6)
+        gates=[]
+        for i in range(bins):
+            if self.temporal_relevance_count[i] < minimum:
+                gates.append(1.)
+                continue
+            logit=(self.temporal_p_ema[i]-threshold)/temperature
+            gates.append(1./(1.+math.exp(-max(-60.,min(60.,logit)))))
+        gate=torch.tensor(gates,dtype=torch.float64)
+        phase_probs=prior*gate
         self.temporal_last_probs=[float(x) for x in phase_probs]
         return phase_probs,candidates
 
@@ -131,6 +144,7 @@ class AllocationController:
                     temporal_attempts=list(self.temporal_attempts),
                     temporal_selected=list(self.temporal_selected),
                     temporal_fallback_root=list(self.temporal_fallback_root),
+                    temporal_soft_fallback_root=self.temporal_soft_fallback_root,
                     temporal_p_raw=list(self.temporal_p_raw),
                     temporal_p_ema=list(self.temporal_p_ema),
                     temporal_relevance_count=list(self.temporal_relevance_count),
@@ -147,11 +161,41 @@ class AllocationController:
         probs = v3_priority_distribution(self.archive.regions, self.cfg, method)
         force_root = ordinary or warmup or (len(self.archive) - 1 < self.cfg.min_non_root_regions)
         if force_root:
-            rids = torch.zeros(n, dtype=torch.long)
-        else:
-            rids = torch.multinomial(probs, n, replacement=True, generator=self.generator)
-        snapshots = [None if int(r) == 0 else self.archive.sample_snapshot(self.archive.regions[int(r)])
-                     for r in rids]
+            return torch.zeros(n, dtype=torch.long), [None] * n, probs
+
+        rids = torch.multinomial(probs, n, replacement=True, generator=self.generator)
+        snapshots = [None] * n
+        if not getattr(self.cfg, 'temporal_stratification', False):
+            snapshots = [None if int(r) == 0
+                         else self.archive.sample_snapshot(self.archive.regions[int(r)])
+                         for r in rids]
+            return rids, snapshots, probs
+
+        phase_probs, phase_candidates = self.temporal_phase_distribution(probs)
+        keep=float(phase_probs.sum())
+        for slot in torch.where(rids > 0)[0].tolist():
+            if (keep <= 0 or
+                    float(torch.rand((),generator=self.generator)) >= keep):
+                self.temporal_soft_fallback_root += 1
+                rids[slot] = 0
+                continue
+            phase = int(torch.multinomial(phase_probs, 1, generator=self.generator))
+            self.temporal_attempts[phase] += 1
+            candidates = phase_candidates[phase]
+            if not candidates:
+                self.temporal_fallback_root[phase] += 1
+                rids[slot] = 0
+                continue
+            weights = probs[candidates]
+            draw = int(torch.multinomial(
+                weights / weights.sum(), 1, generator=self.generator))
+            rid = int(candidates[draw])
+            indices = [i for i,s in enumerate(self.archive.regions[rid].snapshots)
+                       if self.snapshot_phase(s) == phase]
+            snapshots[slot],_ = self.archive.sample_snapshot_from_indices(
+                self.archive.regions[rid], indices)
+            rids[slot] = rid
+            self.temporal_selected[phase] += 1
         return rids, snapshots, probs
 
     def begin_round(self):

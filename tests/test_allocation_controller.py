@@ -252,3 +252,27 @@ def test_temporal_cold_start_is_balanced_but_not_forced_round_robin():
     region_probs=v3_priority_distribution(controller.archive.regions,cfg,'herp')
     phase_probs,_=controller.temporal_phase_distribution(region_probs)
     torch.testing.assert_close(phase_probs,torch.full((3,),1/3,dtype=torch.float64))
+
+
+def test_temporal_mature_low_relevance_phases_soft_fallback_to_root():
+    controller,cfg=_temporal_controller()
+    controller.temporal_p_ema[:]=[-.2,.009,.20]
+    controller.temporal_relevance_count[:]=[10,10,10]
+    region_probs=v3_priority_distribution(controller.archive.regions,cfg,'herp')
+    phase_probs,_=controller.temporal_phase_distribution(region_probs)
+    assert (phase_probs > 0).all(), 'soft gate must retain recovery probes'
+    assert phase_probs[2] > phase_probs[1] > phase_probs[0]
+    assert phase_probs.sum() < 1, 'rejected probability mass must return to root'
+
+
+def test_temporal_choose_batch_uses_adaptive_phase_distribution():
+    controller,_=_temporal_controller()
+    controller.temporal_p_ema[:]=[.08,.80,.18]
+    controller.temporal_relevance_count[:]=[10,10,10]
+    rids,snapshots,_=controller.choose_batch('herp',n=6000)
+    phases=[controller.snapshot_phase(snapshot)
+            for rid,snapshot in zip(rids.tolist(),snapshots)
+            if rid > 0 and snapshot is not None]
+    counts=torch.bincount(torch.tensor(phases),minlength=3)
+    assert counts[1] > counts[2] > counts[0] > 0
+    assert sum(controller.temporal_selected) == len(phases)
