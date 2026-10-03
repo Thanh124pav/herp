@@ -1,786 +1,1216 @@
-# HERP Experimental Plan
+# PLAN.md — MIRA Training-Event Video Capture for ICRA Supplementary Video
 
-**Updated:** 2026-09-15  
-**Scope:** final experiment campaign for the HERP paper  
-**Primary constraint:** interaction training is much slower than initially expected, and some task/method pairs can remain at zero success for millions of transitions. The campaign therefore uses a staged **screen -> freeze -> promote -> full-seed** protocol instead of launching a full Cartesian grid.
+## 0. Objective
 
-The current server profile is CPU-heavy (approximately 88 CPU cores/vCPUs, 256 GB RAM, RTX 3060). The experiment schedule should exploit this asymmetry: **DMC runs on CPU in parallel while ManiSkill uses the GPU**, rather than leaving the CPU idle during GPU simulation.
+Add a **diagnostic video-capture pipeline** to the current MIRA training code so that training can automatically record and surface representative restart/allocation events.
 
----
+The final goal is **not** to produce a polished submission video automatically. The goal is to produce a small set of scientifically faithful candidate clips on Weights & Biases (W&B), from which the author will manually select one for the final ICRA supplementary video.
 
-## 1. Research questions
+Each candidate event should capture, as continuously as practical:
 
-Every main-paper table/figure must answer one of four questions directly.
+1. the ordinary training trajectory before the restart event,
+2. the moment MIRA selects a previously visited region,
+3. the restart from that region snapshot,
+4. the rollout fragments collected according to MIRA's allocated budget,
+5. the different outcomes produced by those restarted rollouts.
 
-### RQ1 — Performance
+The capture window should target:
 
-**Does HERP improve downstream performance under a fixed environment-interaction budget?**
+- **10 seconds before the event**
+- **20 seconds after the event**
 
-HERP is an interaction-allocation framework rather than a policy architecture. Evaluate it across:
-
-- PPO,
-- SAC,
-- model-based RL (MBRL).
-
-The claim is within-backbone: HERP-PPO vs PPO-based competitors, HERP-SAC vs SAC-based competitors, and HERP-TD-MPC2 vs TD-MPC2. The paper does not need to claim that one backbone is globally superior to another.
-
-### RQ2 — Non-trivial resource allocation
-
-**Does HERP produce a non-trivial distribution of interaction budget across behavioral regions rather than collapsing onto one region or staying effectively uniform?**
-
-Primary metric: normalized allocation entropy over training.
-
-### RQ3 — Contribution of relevance and dispersion
-
-**Does the gain come from jointly using relevance `p` and dispersion `sigma`, or essentially from only one factor?**
-
-Run a controlled allocation ablation with identical learner, partition, budget, and evaluation protocol.
-
-### RQ4 — Quality of the sigma estimator
-
-**Does the inexpensive online `sigma` estimator agree with an expensive high-sample Monte-Carlo oracle computed from additional frozen-policy rollouts?**
-
-The oracle must estimate the **same fixed-window future-trajectory dispersion quantity** as HERP. Do not replace it with an unrelated full-network gradient-variance target.
+The system should then automatically rank candidate events by **outcome diversity** and upload the best ones to W&B.
 
 ---
 
-## 2. Global experimental rules
+## 1. Scientific constraints
 
-### 2.1 Count raw environment interactions
+The video is intended as supplementary scientific evidence.
 
-All methods are compared using **raw environment transitions**.
+Therefore:
 
-All HERP acquisition, probing, and training-time reference interactions that influence training are charged to the interaction budget. Evaluation episodes are diagnostic and excluded from the training budget, but their protocol must be identical across compared methods.
+- Do **not** add cinematic effects.
+- Do **not** add transitions beyond hard cuts when unavoidable.
+- Do **not** add music.
+- Do **not** add voice-over.
+- Do **not** add synthetic or staged behavior.
+- Do **not** alter MIRA's policy, allocation rule, environment dynamics, or training data in order to obtain a nicer clip.
+- Do **not** choose events based only on task success.
+- Diagnostic text rendered by the code is allowed and encouraged.
+- Every uploaded candidate must correspond to a real training event.
+- Event ranking must use a pre-defined quantitative rule, not manual cherry-picking.
 
-For baselines with action repeat or native counters, convert to raw environment transitions before comparing budgets.
-
-### 2.2 Equal-budget rule
-
-Once a task and budget are frozen, every method in that comparison receives the same raw interaction budget. Do not early-stop a losing method in the final RQ1 matrix.
-
-Early stopping is allowed only during pilot/screening.
-
-### 2.3 Seeds
-
-1. Pilot/screening: seed 0.
-2. Final promoted cells: seeds 0, 1, 2.
-3. If a key result has unusually high variance, extend **all relevant methods on that task** to seeds 3 and 4.
-
-Report mean +/- standard deviation for the default three-seed results.
-
-### 2.4 Evaluation cadence
-
-Use a fixed cadence inside each environment family. A default of roughly 50k raw interactions is acceptable when evaluation does not dominate wall time. Screening can use 10 evaluation episodes; final manipulation endpoints should preferably use 50--100 episodes if affordable.
-
-### 2.5 No task selection based on HERP winning
-
-Task promotion and budget selection must use task informativeness, not HERP's relative rank. Freeze the cutoff before inspecting the final HERP-vs-baseline result.
+The renderer must be treated as a diagnostic observer and must not affect the training algorithm.
 
 ---
 
-## 3. Baseline matrix
+## 2. Current repository assumptions
 
-### 3.1 PPO group
+The current implementation already contains most required information.
 
-- `PPO`
-- `PPO + RND`
-- `PPO + Disagreement`
-- `HERP-PPO`
+Relevant files:
 
-### 3.2 SAC group
+- `scripts/train_v3.py`
+  - main MIRA/HERP-v3 training loop
+  - computes `p_ema`
+  - computes `sigma_raw`
+  - computes allocation probabilities
+  - computes actual allocated fragments
+  - writes `regions.jsonl`
+  - supports W&B
 
-Where natively supported:
+- `src/herp/vector_acquisition.py`
+  - vectorized allocation/restart logic
+  - `VectorFragmentCollector.collect_round(...)`
+  - restores archived snapshots for non-root region jobs
+  - stores rollout fragments with:
+    - `source_region_id`
+    - states
+    - actions
+    - next states
+    - rewards
+    - chain region IDs
+    - category
+    - slot ID
 
-- `SAC`
-- `RFCL (SAC)`
-- `MaxInfoRL`
-- `BRO`
-- `HERP-SAC`
+- `src/herp/v3_observer.py`
+- `src/herp/vector_acquisition.py::VectorPartitionObserver`
+  - partition events
+  - region assignments
+  - boundaries
 
-RFCL is a curriculum/allocation method built around SAC-style training; it is not a fourth backbone. Do not invent RFCL-PPO or RFCL-TD-MPC2 and present them as literature baselines.
+- `src/herp/archive.py`
+  - region archive
+  - representative snapshots
+  - `p_ema`
+  - `sigma_raw`
+  - region metadata
 
-BRO and MaxInfoRL should use locked/native implementations whenever possible.
+- `src/herp/envs/maniskill.py`
+  - supports ManiSkill `rgb_array`
+  - supports snapshot save/restore
 
-### 3.3 MBRL group
+- `scripts/make_showcase_videos.py`
+  - existing example of:
+    - ManiSkill rendering
+    - MP4 creation
+    - `wandb.Video(...)`
 
-- `TD-MPC2`
-- `HERP-TD-MPC2`
-
-DreamerV3 is intentionally omitted to reduce engineering and compute cost.
-
-### 3.4 N/A is acceptable
-
-The table does not need every method on every task. Prefer a faithful native baseline with an `N/A` elsewhere over an unofficial port created solely to fill a cell.
-
----
-
-## 4. Environment and task suite
-
-### 4.1 MetaWorld
-
-Core task:
-
-- `button-press-v3`
-
-Use one MetaWorld task initially because CPU MuJoCo wall time is comparatively expensive. Primary metric: task success.
-
-### 4.2 ManiSkill
-
-Core/candidate tasks:
-
-- `PickCube-v1`: reliable learning task; use a reduced pre-saturation budget. Primary task for manipulation-side RQ3/RQ4.
-- `LiftPegUpright-v1`: medium/discriminative task; previous matrix produced strong method separation.
-- `PushCube-v1`: low-budget candidate; old 5M setting saturated.
-
-Reserve/challenge:
-
-- `PokeCube-v1`: use only if a lower pre-saturation budget is identified.
-- `PlaceSphere-v1`: challenge task after the method is frozen.
-
-Do not use in the low-budget core unless a new pilot proves feasibility:
-
-- `StackCube-v1`,
-- `PegInsertionSide-v1`.
-
-### 4.3 DeepMind Control Suite (DMC)
-
-Use standard CPU `dm_control`; do not refactor to MJX/Warp for this paper unless profiling later proves necessary.
-
-Core tasks:
-
-- `walker-run`
-- `cartpole-swingup_sparse`
-
-Reserve:
-
-- `cheetah-run`
-
-DMC is now used not only in RQ1 but also as a **cross-domain mechanism validation suite for RQ2--RQ4**. This is attractive on the current CPU-heavy server because DMC simulation can run concurrently with ManiSkill GPU jobs.
-
-Primary DMC metric: episodic return. Standard DMC tasks do not use manipulation-style success probabilities.
-
-### 4.4 Fetch
-
-Do not include Fetch in the first final campaign. Revisit only if the completed core suite is too narrow.
+Reuse existing infrastructure wherever possible.
 
 ---
 
-## 5. Task-budget calibration
+# 3. Design principle
 
-### 5.1 Goal
+Do **not** continuously encode the entire training run into video.
 
-Select `T_task` where the vanilla learner clearly learns but has not already saturated.
-
-For manipulation success tasks, a useful heuristic is:
+Instead use a two-stage architecture:
 
 ```text
-0.2 <= vanilla success(T_task) <= 0.8
+training
+  |
+  +-- maintain a lightweight rolling diagnostic buffer
+  |
+  +-- allocation/restart event occurs
+  |
+  +-- save event package:
+  |      pre-event frames
+  |      event metadata
+  |      restart snapshots
+  |      rollout information
+  |      post-event frames
+  |
+  +-- score event diversity
+  |
+  +-- keep only top candidate events
+  |
+  +-- encode/upload selected candidates to W&B
 ```
 
-This is a heuristic rather than a hard requirement.
+The system may use either:
 
-### 5.2 Initial pilot ranges
+### Preferred mode
 
-| Task | Initial screening range | Intent |
-|---|---:|---|
-| PushCube-v1 | 0.5M--1.5M | pre-saturation regime |
-| PickCube-v1 | 0.5M--2M | learnable but not trivial |
-| LiftPegUpright-v1 | 2M--5M | discriminative manipulation |
-| PokeCube-v1 | 2M--5M | lower than old saturated 10M |
-| PlaceSphere-v1 | up to 5M | challenge only |
-| button-press-v3 | staged short pilot | MetaWorld wall-time control |
-| walker-run | 0.1M, then up to ~0.5M if needed | cheap DMC |
-| cartpole-swingup_sparse | 0.1M, then up to ~0.5M if needed | sparse exploration |
-| cheetah-run | 0.1M, then up to ~0.5M if needed | reserve DMC |
+A dedicated **diagnostic render environment** with `num_envs=1` that mirrors selected training events.
 
-### 5.3 Pilot kill criteria
+This is preferred if rendering the main vectorized training environment would interfere with throughput or simulation behavior.
 
-Kill a pilot after a substantial fraction of its current cap if both are true:
+### Acceptable alternative
 
-1. success remains zero (or DMC return stays near its initial floor), and
-2. dense/episodic return shows no meaningful upward trend.
+Render a selected training slot directly if this can be proven not to change training behavior or simulator state.
 
-Do not kill a sparse-success task if return/progress is clearly improving.
-
-Kill immediately for NaNs, invalid restore, broken action bounds, exploding values, or inconsistent raw-step accounting.
-
-### 5.4 Promotion criteria
-
-Promote if:
-
-- the vanilla learner shows a real learning signal,
-- the task is not completely saturated at `T_task`,
-- evaluation is stable enough for comparisons,
-- HERP restore/region logic is correct,
-- required baselines can run faithfully or unsupported cells are pre-declared `N/A`.
-
-### 5.5 Preferred core
-
-Target approximately five RQ1 tasks:
-
-1. MetaWorld `button-press-v3`
-2. ManiSkill `PickCube-v1`
-3. ManiSkill `LiftPegUpright-v1`
-4. DMC `walker-run`
-5. DMC `cartpole-swingup_sparse`
-
-Reserve: `PushCube-v1`, `PokeCube-v1`, `PlaceSphere-v1`, `cheetah-run`.
+Default to the dedicated diagnostic render path unless direct training-slot rendering is clearly safe.
 
 ---
 
-## 6. RQ1 — Main performance experiment
+# 4. New CLI options
 
-### 6.1 Main table
+Add video-related CLI flags to `scripts/train_v3.py`.
+
+Suggested arguments:
+
+```bash
+--capture-video-events
+--video-fps 30
+--video-pre-seconds 10
+--video-post-seconds 20
+--video-max-candidates 20
+--video-upload-top-k 5
+--video-min-region-prob 0.05
+--video-min-allocated-fragments 2
+--video-min-outcome-diversity 0.0
+--video-resolution 720
+--video-event-dir <output_dir>/video_events
+--video-wandb-prefix mira_events
+```
+
+Behavior:
+
+- video capture is **off by default**
+- experiments without `--capture-video-events` must behave exactly as before
+
+---
+
+# 5. Event definition
+
+A video event begins when all of the following are true:
+
+1. MIRA is active, not in initial warmup.
+2. At least one non-root region receives allocated rollout budget.
+3. The chosen region has a valid archived snapshot.
+4. The allocation round produces at least:
+   - one actual restart from the region, and
+   - at least `video_min_allocated_fragments` fragments from that region.
+
+Prefer candidate regions with larger allocation probability, but do not restrict events only to the highest-probability region.
+
+For every allocation round, identify one or more candidate regions:
+
+```python
+candidate_regions = [
+    r for r in regions
+    if r.region_id > 0
+    and allocations.get(r.region_id, 0) >= min_allocated_fragments
+    and probs[r.region_id] >= min_region_prob
+    and len(r.snapshots) > 0
+]
+```
+
+For each candidate event, store the values that existed **at allocation time**:
 
 ```text
-PPO backbone
-  PPO
-  + RND
-  + Disagreement
-  + HERP
-
-SAC backbone
-  SAC
-  RFCL
-  MaxInfoRL
-  BRO
-  + HERP
-
-MBRL backbone
-  TD-MPC2
-  TD-MPC2 + HERP
+training step
+policy version
+region id
+p_raw
+p_ema
+sigma_raw
+q_direct
+q_pred
+q_combined
+allocation probability
+allocated fragment count
+root fraction
+allocation entropy
+snapshot id / snapshot metadata
 ```
 
-Columns are promoted tasks. Use `N/A` for unsupported combinations.
-
-### 6.2 Metrics
-
-Manipulation:
-
-- primary endpoint: evaluation success at frozen interaction budget,
-- log `success_at_once` and `success_at_end` when available.
-
-DMC:
-
-- primary endpoint: mean episodic return.
-
-All tasks:
-
-- retain learning curves,
-- optionally compute AUC offline as a supplementary sample-efficiency diagnostic.
-
-### 6.3 Fairness
-
-Within each task/backbone comparison:
-
-- identical raw interaction budget,
-- same core learner settings for HERP vs vanilla backbone,
-- same observation/reward protocol,
-- same evaluation seeds/episodes,
-- no method-specific budget extension after seeing results.
+Do not recompute these values later for display.
 
 ---
 
-## 7. RQ2 — Does allocation collapse?
+# 6. What one event clip must show
 
-RQ2 is intentionally narrow. It tests whether the learned resource distribution is non-trivial/non-collapsed; it does not by itself prove semantic optimality.
-
-### 7.1 Metric
-
-At allocation decision `t`, let `q_t(v)` be the probability mass assigned to region `v` and `K_t` the number of eligible regions:
+Each event clip should represent approximately:
 
 ```text
-H_norm(t) = - sum_v q_t(v) log q_t(v) / log(K_t)
+[-10 s] ---------------- EVENT ---------------- [+20 s]
 ```
 
-Interpretation:
+The clip should make the following sequence visible:
 
-- `H_norm ~ 0`: collapse onto one/few regions,
-- `H_norm ~ 1`: nearly uniform allocation,
-- intermediate/changing values: structured preference without complete collapse.
+### A. Pre-event training
 
-Exclude or shade the root-only/warmup interval before the learned allocator is active.
+Show the ordinary training trajectory leading into the allocation event.
 
-### 7.2 Tasks: cross-domain rather than ManiSkill-only
+Goal:
 
-Use four curves if all tasks pass screening:
+- make clear that the agent is interacting normally with the environment
+- establish the state/task context before restart
 
-**ManiSkill**
-- `PickCube-v1`
-- `LiftPegUpright-v1`
+### B. Allocation/restart moment
 
-**DMC**
-- `walker-run`
-- `cartpole-swingup_sparse`
+When MIRA chooses a non-root region:
 
-This tests whether non-collapse is a property of the allocator rather than an artifact of one simulator family.
+- show the selected source region
+- show that the environment is restored to an archived snapshot
+- show the associated diagnostic values
 
-If four lines make the main plot unreadable, use two panels:
+### C. Allocated rollout fragments
 
-- panel (a): ManiSkill,
-- panel (b): DMC.
+Show the restarted rollouts generated from the selected region.
 
-Do not add extra entropy variants, heatmaps, effective-region-count, or max-share to the main paper unless entropy is ambiguous.
-
-### 7.3 Reuse rule
-
-Do not launch dedicated RQ2 training if protocol-identical HERP runs from RQ1/RQ3 already log `q_t(v)`. Generate RQ2 from those logs.
-
----
-
-## 8. RQ3 — Does joint `p x sigma` help?
-
-RQ3 now uses one representative task from each simulator family.
-
-### 8.1 Tasks
-
-**Primary manipulation task**
-
-- `PickCube-v1` at its frozen reduced budget.
-
-**Primary DMC task**
-
-- `cartpole-swingup_sparse` at its frozen pre-saturation budget.
-
-Rationale: PickCube gives the agreed manipulation success metrics, while sparse Cartpole provides a cheap CPU-side test of whether the same `p x sigma` interaction matters in a qualitatively different exploration problem.
-
-If sparse Cartpole fails screening, fall back to `walker-run`; do not force an all-zero ablation.
-
-### 8.2 Methods
-
-For each task, same backbone and same HERP region/reset machinery:
-
-1. `HERP` — `p x sigma`
-2. `herp_p` — `p` only
-3. `herp_sigma` — `sigma` only
-4. `uniform` — uniform allocation over eligible regions
-
-Use `uniform` rather than vanilla PPO as the clean mechanism control because it preserves HERP acquisition machinery while removing learned prioritization.
-
-### 8.3 Main-paper figure
-
-Keep this compact under the 8-page limit.
-
-Recommended three-panel figure:
-
-- (a) PickCube `success_at_once` vs raw interactions,
-- (b) PickCube `success_at_end` vs raw interactions,
-- (c) DMC `cartpole-swingup_sparse` episodic return vs raw interactions.
-
-Each panel has four curves: HERP / p-only / sigma-only / uniform, mean over seeds 0--2 with a light standard-deviation band.
-
-If space becomes tight, keep panels (a,b) in the main paper and report the DMC ablation as a compact endpoint row/table plus full curve in supplementary material. The DMC experiment should still be run.
-
-### 8.4 Decision gate
-
-Start with seed 0 on both tasks. If full `p x sigma` is clearly broken relative to `p`-only across both domains, stop and fix the method before running the expensive RQ1 matrix.
-
-Do not hide a p-only win.
-
----
-
-## 9. RQ4 — Validate sigma against a high-sample oracle
-
-### 9.1 Quantity being validated
-
-HERP's online estimator measures dispersion of fixed-horizon trajectory features, not full-network gradient variance.
-
-For each region:
+The event should make it possible to see:
 
 ```text
-sigma_online(v) = sqrt(q_combined(v) + sigma_floor^2)
+same / similar restart region
+        |
+        +--> continuation 1
+        +--> continuation 2
+        +--> continuation 3
+        ...
 ```
 
-where `q_combined` is the online direct/predictor shrinkage quantity used by the allocator.
+The most valuable clips are those in which these continuations visibly diverge.
 
-### 9.2 Oracle
+### D. Outcome summary
 
-At a frozen checkpoint:
-
-1. freeze policy,
-2. freeze partition/regions,
-3. freeze feature normalizer,
-4. select eligible regions,
-5. restore snapshots,
-6. collect many additional independent fixed-horizon fragments,
-7. compute exactly the same fixed-window trajectory-dispersion statistic from the large pool.
+At the end of the event window, optionally display a static diagnostic line for ~1 second:
 
 ```text
-q_oracle(v)     = high-sample fixed-window future-trajectory variance
-sigma_oracle(v) = sqrt(q_oracle(v) + sigma_floor^2)
+region=R7 | allocated=8 | distinct_outcomes=4 | diversity=0.73
 ```
 
-Oracle interactions are diagnostic only and are never fed back into training.
-
-### 9.3 Tasks: two-domain validation
-
-Run oracle validation on:
-
-**ManiSkill**
-- `PickCube-v1`
-
-**DMC**
-- `walker-run`
-
-`walker-run` is preferred over sparse Cartpole for RQ4 because it provides a rich continuous-control continuation distribution and high-sample rollouts are cheap on the CPU-heavy server.
-
-This gives a stronger claim than validating the estimator on only one manipulation task.
-
-### 9.4 Sampling protocol
-
-Initial target per task/checkpoint:
-
-- oracle pool: 128 future fragments per selected region,
-- selected regions: approximately 20--30 including root,
-- checkpoints: roughly 25%, 50%, 75% of the frozen task budget,
-- seeds: 0--2 if affordable; at minimum all three seeds at the middle checkpoint.
-
-For DMC, because rollout collection is CPU-cheap, increase the oracle pool to 256 if the 128-sample oracle remains visibly unstable. Do not increase ManiSkill automatically just because DMC can afford it.
-
-Use the existing `scripts/collect_sigma_oracle.py` and `analysis/sigma_diagnostics.py` design; generalize the collector to DMC rather than inventing a different estimator.
-
-### 9.5 Required saved values
-
-For each selected region save:
-
-- `sigma_raw`,
-- `q_direct`,
-- `q_pred`,
-- `q_combined`,
-- direct sample count,
-- `q_oracle` / `sigma_oracle`,
-- checkpoint, task, seed.
-
-### 9.6 Metric and figure
-
-Primary metric: Spearman rank correlation `rho`.
-
-Main-paper figure: two panels if space allows:
-
-- (a) PickCube: `sigma_oracle` vs `sigma_online`,
-- (b) WalkerRun: `sigma_oracle` vs `sigma_online`.
-
-Each point is one region; annotate `rho`.
-
-If page space is tight, show one representative scatter plus a tiny table reporting `rho` for both tasks/checkpoints. Keep Pearson/Kendall/NDCG/bias-variance analyses in supplementary material.
-
-Use the same valid-mask/common-window logic as training and log censoring/early termination.
+This is diagnostic information, not a cinematic effect.
 
 ---
 
-## 10. Engineering prerequisites
+# 7. Diagnostic overlay
 
-Before spending compute on seeds 1--2:
+Use a small fixed HUD in a corner.
 
-### 10.1 PPO/HERP path
+Do not animate it.
 
-Smoke-test PPO, RND, Disagreement, HERP, p-only, sigma-only, and uniform on every promoted environment. Verify:
-
-- raw steps,
-- evaluation,
-- no NaNs,
-- snapshot restore,
-- region growth,
-- allocation probabilities sum to one.
-
-### 10.2 SAC path
-
-Verify vanilla SAC and HERP-SAC share the same core SAC update/replay settings within each direct comparison.
-
-### 10.3 RFCL
-
-Use a locked/native implementation on genuinely supported tasks. Prefer `N/A` over a large unofficial port.
-
-### 10.4 BRO / MaxInfoRL
-
-Use locked upstream checkouts through `scripts/run_external_native.py`. Verify raw DMC interaction accounting.
-
-### 10.5 TD-MPC2 / HERP-TD-MPC2
-
-Before making an MBRL modularity claim, verify that HERP is truly integrated into TD-MPC2's environment interaction/reset selection layer while the world model/planner/training remain unchanged.
-
-### 10.6 MetaWorld
-
-Verify the known CPU-simulator / CUDA-action-bound device issue before launching the final task.
-
-### 10.7 DMC
-
-Use CPU `dm_control`; keep GPU use minimal/optional for the learner. Verify HERP restore/region state serialization and raw-step accounting before starting DMC RQ2--RQ4.
-
----
-
-## 11. Logging requirements
-
-### 11.1 Common
-
-At every evaluation log:
-
-- method,
-- backbone,
-- task,
-- seed,
-- raw environment steps,
-- eval return,
-- success metrics if defined,
-- wall-clock time,
-- policy/update count,
-- git/config/provenance.
-
-### 11.2 HERP-specific
-
-At allocation intervals log:
-
-- active/eligible region count,
-- allocation probability per region,
-- normalized allocation entropy,
-- `p_raw`, `p_ema`,
-- `q_direct`, `q_pred`, `q_combined`,
-- `sigma_raw`,
-- sigma direct sample count,
-- root allocation share,
-- acquisition/probe/reference interaction counts,
-- region creation/merge events.
-
-### 11.3 Checkpointing
-
-For both RQ4 tasks (`PickCube-v1`, `walker-run`), save approximately:
-
-- 25% of `T_task`,
-- 50%,
-- 75%,
-- final.
-
-Each checkpoint must include policy, regions/archive, normalizer, predictor, allocator statistics, policy version, and counters.
-
----
-
-## 12. CPU/GPU parallel execution on the current server
-
-The current machine should be treated as two concurrent resources:
+Suggested fields:
 
 ```text
-RTX 3060  -> ManiSkill GPU simulation + learner
-88 CPU cores/vCPUs -> DMC + MetaWorld + oracle jobs + analysis
-256 GB RAM -> many independent CPU jobs / replay buffers / oracle pools
+step: 421888
+policy version: 37
+source: R7
+p_v: 0.812
+sigma_v: 0.637
+allocation prob: 0.274
+allocated fragments: 8
+restart rollout: 3 / 8
 ```
 
-### 12.1 ManiSkill lane
-
-Run one primary ManiSkill training job on the RTX 3060 initially. Tune `num_envs` downward from the previous 1024-env 5080/5090 configuration until GPU memory and simulator throughput are stable; likely screen 128/256/512 rather than assuming 1024.
-
-Do not oversubscribe the 3060 with many simultaneous ManiSkill training cells unless profiling proves it increases aggregate transitions/sec.
-
-### 12.2 DMC lane
-
-DMC jobs are independent and should run concurrently with the ManiSkill GPU lane.
-
-Start conservatively with several independent DMC processes rather than one process using all CPU threads. Set per-process BLAS/PyTorch thread counts low (typically `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, and small `torch.set_num_threads`) so 88 cores are used across experiments rather than by nested thread pools.
-
-Suggested initial schedule:
-
-- reserve roughly 8--16 CPU cores/vCPUs for OS, logging, ManiSkill orchestration, and evaluation,
-- use the remaining CPU capacity for independent DMC cells,
-- increase concurrency only after measuring aggregate raw steps/sec and RAM use.
-
-Do not assume the advertised 88 cores are 88 dedicated physical cores; benchmark actual throughput on the rented host.
-
-### 12.3 Parallel campaign rule
-
-Whenever a ManiSkill job is running on GPU, keep the CPU lane occupied with one of:
-
-- DMC budget pilots,
-- DMC RQ3 ablations,
-- DMC RQ4 oracle rollouts,
-- DMC RQ1 baselines,
-- MetaWorld pilot,
-- analysis/post-processing.
-
-This is the default schedule unless CPU contention measurably slows ManiSkill `physx_cuda` throughput.
-
----
-
-## 13. Execution order
-
-### Stage A — preflight
-
-1. Unit tests.
-2. 50k--100k smoke runs for all adapters.
-3. Raw-step accounting.
-4. MetaWorld device fix.
-5. DMC CPU restore/region path.
-6. External baseline locks.
-7. HERP-TD-MPC2 integration check.
-8. Profile concurrent ManiSkill + DMC throughput on the rented machine.
-
-### Stage B — budget pilots
-
-In parallel:
-
-- GPU lane: ManiSkill vanilla pilots,
-- CPU lane: DMC vanilla pilots and MetaWorld pilot.
-
-Freeze `task_budgets.json` without looking for a HERP-favorable cutoff.
-
-### Stage C — RQ3 gate
-
-Run both domains:
-
-- GPU: PickCube HERP / p-only / sigma-only / uniform,
-- CPU: sparse Cartpole HERP / p-only / sigma-only / uniform.
-
-Seed 0 first. If the joint mechanism is plausible, run seeds 1--2 and freeze the method.
-
-### Stage D — RQ4 sigma validation
-
-Collect oracle diagnostics on:
-
-- PickCube (GPU-assisted ManiSkill),
-- WalkerRun (CPU DMC).
-
-Run DMC oracle work concurrently with other GPU experiments whenever possible.
-
-### Stage E — RQ2 entropy
-
-Produce entropy curves from already completed protocol-identical HERP runs:
-
-- PickCube,
-- LiftPegUpright,
-- WalkerRun,
-- sparse Cartpole.
-
-Dedicated RQ2 training should normally be unnecessary.
-
-### Stage F — RQ1 seed-0 matrix
-
-Run every frozen cell once. Use CPU/GPU lanes concurrently.
-
-### Stage G — RQ1 final seeds
-
-After Stage F passes, launch seeds 1--2. Extend to seeds 3--4 only for objectively ambiguous key comparisons.
-
-### Stage H — reserve/challenge
-
-Only after core claims are complete:
-
-- PushCube/PokeCube low-budget variants,
-- PlaceSphere,
-- cheetah-run,
-- additional MetaWorld,
-- StackCube/PegInsertion only after a practical learning budget is demonstrated.
-
----
-
-## 14. Compute-saving rules
-
-1. No full-grid-first strategy.
-2. No >5M manipulation task in the core suite without a pilot justification.
-3. Three seeds by default, not five.
-4. Reuse RQ1/RQ3 HERP logs for RQ2.
-5. Reuse RQ1/RQ3 checkpoints for RQ4 whenever protocol-compatible.
-6. Keep DMC on CPU and run it concurrently with ManiSkill GPU jobs.
-7. Do not port unsupported baselines solely for a decorative table cell.
-8. Do not run StackCube/PegInsertion blindly.
-9. Do not let evaluation dominate training wall time.
-10. Optimize **aggregate useful experiments/hour**, not utilization of a single GPU.
-
----
-
-## 15. Main-paper outputs under the 8-page limit
-
-### Table 1 — RQ1
-
-One table:
-
-- row groups: PPO / SAC / MBRL,
-- columns: promoted tasks,
-- cells: mean +/- std,
-- `N/A` where appropriate.
-
-### Figure 1 — RQ1 learning curves (optional)
-
-One manipulation curve and one DMC curve if space permits.
-
-### Figure 2 — RQ2 allocation entropy
-
-Prefer two compact panels:
-
-- ManiSkill: PickCube + LiftPegUpright,
-- DMC: WalkerRun + sparse Cartpole.
-
-### Figure 3 — RQ3 component ablation
-
-Three compact panels:
-
-- PickCube `success_at_once`,
-- PickCube `success_at_end`,
-- sparse Cartpole episodic return.
-
-If page space is insufficient, move the DMC curve to supplement but retain its endpoint in text/table.
-
-### Figure 4 — RQ4 sigma estimator
-
-Two compact scatter panels (PickCube and WalkerRun) if readable. Otherwise show one scatter and a small table of Spearman correlations for both domains.
-
----
-
-## 16. Decision logic
-
-Desired evidence:
-
-- RQ1: HERP improves fixed-budget performance across multiple tasks/backbones.
-- RQ2: allocation does not collapse or remain permanently uniform across both simulator families.
-- RQ3: `p x sigma` improves over p-only/sigma-only on at least a consistent subset and does not systematically degrade both domains.
-- RQ4: online sigma positively rank-correlates with the high-sample oracle in both manipulation and DMC.
-
-If RQ3 fails across both domains, revisit the combination rule/normalization before paying for the full matrix.
-
-If RQ4 fails but RQ3 succeeds, sigma may still be a useful heuristic but cannot be claimed as an accurate estimator of the proposed dispersion quantity.
-
-If RQ1 is mixed, report where HERP helps rather than selecting only winning tasks.
-
----
-
-## 17. Repository artifacts
+When showing the pre-event part:
 
 ```text
-outputs/final_campaign/
-  pilots/
-  rq1/
-  rq2/
-  rq3/
-    maniskill/
-    dmc/
-  rq4/
-    maniskill/
-    dmc/
-  task_budgets.json
-  manifest.json
-  decision_log.md
-
-analysis/
-  plot_rq1.py
-  plot_rq2_entropy.py
-  plot_rq3_ablation.py
-  sigma_diagnostics.py
-  make_main_table.py
+mode: ordinary training
+current region: R3
 ```
 
-Every run directory should contain provenance/config, metrics, summary, checkpoints when required, and console logs.
+When showing restart:
+
+```text
+mode: region restart
+source region: R7
+```
+
+Do not show more information than fits cleanly.
+
+Implementation may use OpenCV or PIL.
 
 ---
 
-## 18. Immediate next actions
+# 8. Rolling pre-event buffer
 
-1. Benchmark the rented node: one ManiSkill job + several DMC jobs concurrently; record aggregate throughput.
-2. Fix/verify DMC HERP adapter, restore semantics, and raw-step accounting.
-3. Run vanilla budget pilots for ManiSkill and DMC **in parallel**.
-4. Freeze `task_budgets.json`.
-5. Run RQ3 seed 0 simultaneously: PickCube on GPU and sparse Cartpole on CPU.
-6. If RQ3 is viable, run seeds 1--2 and freeze HERP.
-7. Run RQ4 on PickCube and WalkerRun; exploit CPU capacity for the WalkerRun oracle.
-8. Produce RQ2 from PickCube/LiftPeg + WalkerRun/sparse-Cartpole HERP logs.
-9. Run RQ1 seed-0 matrix with CPU/GPU lanes simultaneously.
-10. After all cells are valid, run final seeds 1--2.
-11. Only then run reserve/challenge tasks.
+To capture 10 seconds before an event, maintain a rolling frame buffer.
 
-The guiding principle is simple: **while the RTX 3060 is busy with ManiSkill, the CPU pool should be producing DMC evidence for the same paper.**
+For `fps = 30`:
+
+```python
+pre_frames = video_pre_seconds * video_fps
+# default: 300 frames
+```
+
+Use:
+
+```python
+collections.deque(maxlen=pre_frames)
+```
+
+Each stored frame should already contain the diagnostic HUD corresponding to that frame.
+
+Avoid storing raw simulator tensors if this creates excessive memory usage.
+
+If 720p frames are too expensive to keep uncompressed:
+
+- reduce diagnostic capture FPS internally, or
+- keep JPEG-compressed frames in memory, or
+- use a lightweight temporary rolling video segment
+
+but the final candidate output should still satisfy the intended video quality.
+
+The default implementation should prioritize robustness over perfect efficiency.
+
+---
+
+# 9. Post-event capture
+
+After an allocation/restart event is triggered, continue recording for:
+
+```text
+20 seconds
+```
+
+or until all allocated restarted fragments associated with the selected event have completed, whichever gives a more semantically complete event.
+
+Prefer capturing the full restart allocation if it exceeds 20 seconds slightly.
+
+Do not truncate a rollout in the middle solely to hit exactly 20 seconds.
+
+Hard maximum per candidate clip:
+
+```text
+40 seconds
+```
+
+unless explicitly overridden.
+
+---
+
+# 10. Mapping vectorized training to a readable video
+
+The main training may use many parallel environments.
+
+Do **not** attempt to tile hundreds of training slots.
+
+For each candidate event:
+
+1. choose one source region `v`,
+2. choose the training fragments from that region,
+3. replay or render them sequentially in a single diagnostic environment.
+
+Recommended presentation:
+
+```text
+pre-event trajectory
+restart from R_v
+rollout 1
+restart from R_v
+rollout 2
+restart from R_v
+rollout 3
+...
+```
+
+This remains faithful to the actual training event as long as:
+
+- the policy checkpoint is the one used in that event,
+- the same archived restart snapshot is used,
+- the same actions are replayed when exact replay is possible,
+- or the exact stored fragment states/actions are used to reconstruct the rollout.
+
+Prefer exact replay using recorded actions.
+
+Do not resample actions merely for video generation if the goal is to visualize the actual training event.
+
+---
+
+# 11. Event package format
+
+Create a new module, for example:
+
+```text
+src/herp/video_events.py
+```
+
+Define an event package containing at least:
+
+```python
+@dataclass
+class VideoEvent:
+    event_id: str
+    training_step: int
+    policy_version: int
+
+    region_id: int
+
+    p_raw: float
+    p_ema: float
+    sigma_raw: float
+    q_direct: float
+    q_pred: float
+    q_combined: float
+
+    allocation_prob: float
+    allocated_fragments: int
+
+    pre_frames: list
+    post_frames: list
+
+    restart_snapshot: object
+    rollout_fragments: list
+
+    outcome_features: object | None
+    diversity_score: float | None
+    distinct_outcome_count: int | None
+```
+
+If storing full Python objects makes serialization fragile, split into:
+
+```text
+event_<id>.json
+event_<id>.pt
+event_<id>.mp4
+```
+
+Example:
+
+```text
+outputs/.../video_events/
+    event_000421888_r7.json
+    event_000421888_r7.pt
+    event_000421888_r7.mp4
+```
+
+The JSON should contain only lightweight metadata.
+
+---
+
+# 12. Outcome representation
+
+The automatic selector must rank events by **diversity of outcomes**, not simply by success count.
+
+Use data already available in rollout fragments.
+
+For each restarted fragment, compute a compact outcome feature.
+
+Preferred feature:
+
+```python
+psi_i = concat(
+    final_normalized_state,
+    mean_normalized_state_over_last_k_steps,
+    cumulative_reward,
+    terminal_flag,
+    success_once,
+    success_at_end,
+)
+```
+
+Suggested:
+
+```text
+k = min(5, fragment length)
+```
+
+Do not rely only on final reward because distinct physical outcomes can have similar reward.
+
+If ManiSkill task-specific success flags are available, include them, but keep the state-based representation primary.
+
+Normalize continuous components before distance computation.
+
+---
+
+# 13. Distinct-outcome clustering
+
+For all restarted fragments from the same event:
+
+```text
+Ψ1, Ψ2, ..., ΨN
+```
+
+cluster them into outcome groups.
+
+Use a simple, transparent method.
+
+Recommended:
+
+### Option A — agglomerative clustering
+
+Distance:
+
+```math
+d(i,j) = ||Psi_i - Psi_j||_2
+```
+
+with a fixed threshold.
+
+### Option B — radius clustering
+
+Greedily create a new cluster when:
+
+```math
+min_j d(Psi_i, center_j) > delta_outcome
+```
+
+Prefer radius clustering because it is easy to explain and has no dependency on knowing the number of clusters.
+
+Add a CLI parameter:
+
+```bash
+--video-outcome-radius
+```
+
+Choose a conservative default after inspecting state-feature scales.
+
+The implementation must log the radius used.
+
+---
+
+# 14. Diversity score
+
+Compute at least two metrics.
+
+## 14.1 Distinct outcome count
+
+```text
+K = number of outcome clusters
+```
+
+## 14.2 Pairwise diversity
+
+```math
+D_pair =
+2 / (N(N-1))
+sum_{i<j} ||Psi_i - Psi_j||_2
+```
+
+Normalize if needed.
+
+## 14.3 Recommended ranking score
+
+Use:
+
+```math
+score =
+log(1 + K)
+*
+D_pair
+*
+log(1 + N)
+```
+
+where:
+
+- `K` = distinct cluster count
+- `D_pair` = mean pairwise outcome distance
+- `N` = number of restarted rollout fragments
+
+This rewards:
+
+- many distinct outcomes,
+- strongly different outcomes,
+- enough rollout samples.
+
+Do not include success rate directly in the primary ranking score.
+
+Success may be logged as secondary metadata.
+
+---
+
+# 15. Minimum validity criteria
+
+An event is valid only if:
+
+```text
+allocated restarted fragments >= 3
+distinct outcome clusters >= 2
+pairwise diversity > 0
+```
+
+Recommended stronger filter for upload:
+
+```text
+allocated restarted fragments >= 4
+distinct outcome clusters >= 3
+```
+
+Make these configurable.
+
+---
+
+# 16. Candidate retention
+
+Do not save unlimited videos.
+
+Keep only the best `video_max_candidates` metadata packages during training.
+
+Recommended default:
+
+```text
+video_max_candidates = 20
+```
+
+After training:
+
+1. compute/recompute diversity scores,
+2. sort descending,
+3. render/encode only the best candidates,
+4. upload only top `video_upload_top_k`.
+
+Default:
+
+```text
+video_upload_top_k = 5
+```
+
+This avoids filling W&B with hundreds of clips.
+
+---
+
+# 17. W&B logging
+
+Use a dedicated namespace.
+
+For each uploaded candidate:
+
+```python
+wandb_run.log({
+    f"video_events/{event_id}": wandb.Video(
+        str(mp4_path),
+        format="mp4",
+        caption=caption,
+    ),
+})
+```
+
+Also log metadata:
+
+```text
+video_event/<event_id>/training_step
+video_event/<event_id>/region_id
+video_event/<event_id>/p
+video_event/<event_id>/sigma
+video_event/<event_id>/allocation_prob
+video_event/<event_id>/allocated_fragments
+video_event/<event_id>/distinct_outcomes
+video_event/<event_id>/pairwise_diversity
+video_event/<event_id>/ranking_score
+video_event/<event_id>/success_count
+```
+
+Prefer uploading candidates to the same training run if convenient.
+
+If this makes the run too heavy, create a linked evaluation run with:
+
+```text
+group = original training group
+job_type = "video_diagnostics"
+```
+
+Preserve:
+
+```text
+source training run id
+source checkpoint
+training step
+policy version
+seed
+```
+
+---
+
+# 18. Add allocation probability to region logs
+
+In `scripts/train_v3.py`, update the existing `regions.jsonl` output.
+
+Currently each region logs `allocated_fragments`.
+
+Also log:
+
+```python
+allocation_prob=float(probs[r.region_id])
+```
+
+if the probability exists for that region.
+
+Example:
+
+```python
+row.update(
+    step=collector.total_steps,
+    policy_version=version,
+    allocation_prob=float(probs[r.region_id]),
+    allocated_fragments=allocations.get(r.region_id, 0),
+)
+```
+
+Ensure indexing is correct even if region IDs and probability tensor indices ever diverge.
+
+Prefer an explicit `{region_id: probability}` mapping.
+
+---
+
+# 19. Capture exact fragments associated with an event
+
+The event must contain the exact rollout fragments produced by the allocation round.
+
+From the `batch` returned by:
+
+```python
+collector.collect_round(...)
+```
+
+select:
+
+```python
+event_fragments = [
+    f for f in batch
+    if f.source_region_id == region_id
+    and f.category == "REGION_ACQUISITION"
+]
+```
+
+Store:
+
+```text
+states
+actions
+next_states
+rewards
+terminated
+truncated
+chain_region_id
+slot_id
+policy_version
+source_region_id
+```
+
+These are the scientific ground truth for the event video.
+
+---
+
+# 20. Capture restart snapshot identity
+
+Do not simply display "restart from R7".
+
+Record exactly which archived snapshot was used for each allocated fragment.
+
+Currently `VectorFragmentCollector.collect_round(...)` samples snapshots internally.
+
+Modify the collector so that each produced `RolloutFragment` can optionally retain lightweight restart metadata:
+
+```text
+restart_region_id
+restart_snapshot_index
+restart_snapshot_timestep
+restart_snapshot_elapsed_steps
+```
+
+Avoid duplicating large simulator state objects into every fragment if unnecessary.
+
+If exact replay later requires simulator state, save the selected snapshot once per unique restart instance.
+
+---
+
+# 21. Modify vector acquisition carefully
+
+Any modification to:
+
+```text
+src/herp/vector_acquisition.py
+```
+
+must satisfy:
+
+- no change to sampled region IDs,
+- no change to sampled snapshots,
+- no change to RNG order,
+- no additional calls to `torch.multinomial`,
+- no additional environment steps,
+- no change to PPO batch contents,
+- no change to interaction accounting.
+
+Diagnostic capture must observe existing decisions, not recreate them inside the training loop.
+
+Add tests for this.
+
+---
+
+# 22. Video rendering
+
+Create:
+
+```text
+scripts/render_mira_video_events.py
+```
+
+Responsibilities:
+
+1. load event packages,
+2. rank events if not already ranked,
+3. select top K,
+4. reconstruct/render each event,
+5. draw minimal diagnostic HUD,
+6. encode MP4,
+7. optionally upload to W&B.
+
+Use:
+
+```text
+render_mode="rgb_array"
+num_envs=1
+```
+
+for the diagnostic environment.
+
+Use the same:
+
+```text
+env_id
+control_mode
+reward_mode
+obs_mode
+```
+
+as the source training run.
+
+Use MP4/H.264 if available.
+
+Suggested render defaults:
+
+```text
+720p
+30 fps
+```
+
+Keep local candidate videos independent from final ICRA size compression.
+
+The author will later choose one event and compress/edit it for submission.
+
+---
+
+# 23. Exact replay preference
+
+For every candidate fragment:
+
+1. restore the exact saved snapshot,
+2. replay the exact stored actions,
+3. capture rendered frames.
+
+Do not call the policy to generate new actions during event rendering unless exact replay is impossible.
+
+This ensures the candidate video shows the actual training experience.
+
+Verify replay consistency using state error:
+
+```math
+max_t ||s_t^{replay} - s_t^{logged}||_\infty
+```
+
+Log this value.
+
+Target:
+
+```text
+< 1e-3
+```
+
+If replay diverges beyond tolerance:
+
+- flag the candidate,
+- do not silently claim exact replay,
+- prefer another event for upload.
+
+---
+
+# 24. Pre-event reconstruction
+
+The 10-second pre-event segment should preferably come from the actual training trajectory associated with the relevant slot or source trajectory.
+
+If exact pre-event reconstruction is difficult in the first implementation:
+
+### Phase 1 acceptable implementation
+
+Maintain a rolling rendered frame buffer from one designated diagnostic training slot.
+
+### Phase 2 preferred implementation
+
+Store enough state/action history to replay the exact preceding trajectory for the selected event.
+
+Do not fabricate a pre-event trajectory from an unrelated episode.
+
+---
+
+# 25. Event selection should happen after training
+
+The final top-event selection should happen after the run completes.
+
+Workflow:
+
+```text
+training
+  -> collect candidate event packages
+  -> finish training
+  -> score all candidates
+  -> rank candidates
+  -> render top K
+  -> upload top K to W&B
+```
+
+This is preferred over immediately uploading every event.
+
+If the process crashes before training completes, retain saved event packages so rendering can be resumed separately.
+
+---
+
+# 26. Summary artifact
+
+After ranking, write:
+
+```text
+video_events/ranking.json
+```
+
+Example:
+
+```json
+[
+  {
+    "rank": 1,
+    "event_id": "step421888_r7",
+    "step": 421888,
+    "region_id": 7,
+    "p": 0.812,
+    "sigma": 0.637,
+    "allocation_prob": 0.274,
+    "allocated_fragments": 8,
+    "distinct_outcomes": 4,
+    "pairwise_diversity": 0.73,
+    "ranking_score": 2.91,
+    "mp4": "event_step421888_r7.mp4"
+  }
+]
+```
+
+This file should make manual review easy.
+
+---
+
+# 27. Tests
+
+Add unit/integration tests.
+
+## 27.1 No behavioral change
+
+Run the same short seeded training job with capture:
+
+```text
+OFF
+ON
+```
+
+Compare:
+
+```text
+region allocations
+environment-step counts
+policy parameter checksum after a short deterministic test
+```
+
+They should be identical, except for wall-clock time and diagnostic outputs.
+
+## 27.2 Event extraction
+
+Synthetic fragments with known outcomes should produce expected:
+
+```text
+distinct outcome count
+pairwise diversity
+ranking order
+```
+
+## 27.3 Replay consistency
+
+For a short ManiSkill event:
+
+```text
+restore snapshot
+replay actions
+compare next states
+```
+
+Verify replay error is below tolerance.
+
+## 27.4 W&B smoke test
+
+Upload one tiny generated clip and verify:
+
+```text
+wandb.Video
+metadata
+run linkage
+```
+
+---
+
+# 28. Performance considerations
+
+Training speed remains more important than video generation.
+
+Requirements:
+
+- do not render every vector slot,
+- do not encode MP4 during every training step,
+- do not block GPU training on ffmpeg,
+- do not retain unlimited raw frames,
+- avoid copying all vector observations to CPU solely for video capture.
+
+If rendering causes noticeable training slowdown:
+
+1. reduce diagnostic capture FPS,
+2. use asynchronous local encoding only if safely implemented,
+3. otherwise save event replay data and render after training.
+
+Prefer post-training replay if there is any doubt.
+
+---
+
+# 29. Recommended first experiment
+
+Use one ManiSkill task where:
+
+- MIRA reaches meaningful intermediate states,
+- restarts are frequent enough,
+- the environment produces visibly different continuation outcomes.
+
+Start with:
+
+```text
+PickCube-v1
+```
+
+unless recent experiments show another task has substantially clearer restart diversity.
+
+Suggested command shape:
+
+```bash
+python scripts/train_v3.py \
+  --benchmark maniskill \
+  --env-id PickCube-v1 \
+  --method herp \
+  --num-envs <existing_setting> \
+  --total-timesteps <normal_training_budget> \
+  --wandb-mode online \
+  --capture-video-events \
+  --video-pre-seconds 10 \
+  --video-post-seconds 20 \
+  --video-max-candidates 20 \
+  --video-upload-top-k 5 \
+  --output-dir outputs/mira_video_pickcube_s0
+```
+
+Use the project's current MIRA method name if it has been renamed from `herp` in the CLI.
+
+Do not silently change training hyperparameters merely to obtain better-looking footage.
+
+---
+
+# 30. Deliverables
+
+Codex should finish with:
+
+```text
+src/herp/video_events.py
+scripts/render_mira_video_events.py
+```
+
+plus minimal modifications to:
+
+```text
+scripts/train_v3.py
+src/herp/vector_acquisition.py
+```
+
+and tests.
+
+Required outputs from one completed training run:
+
+```text
+<output_dir>/
+    video_events/
+        event_*.json
+        event_*.pt
+        event_*.mp4
+        ranking.json
+```
+
+W&B should contain the top candidate videos.
+
+---
+
+# 31. Acceptance criteria
+
+The task is complete when all of the following are true:
+
+1. Training with video capture disabled behaves exactly as before.
+2. Training with capture enabled preserves the same algorithmic decisions under the same seed.
+3. Candidate events correspond to real MIRA allocation/restart events.
+4. Each event contains:
+   - pre-event context,
+   - restart,
+   - allocated rollout fragments,
+   - resulting outcomes.
+5. Diagnostic overlay shows real logged values.
+6. Outcome diversity is computed automatically.
+7. Candidates are ranked automatically.
+8. Only top-K candidate videos are uploaded to W&B.
+9. Each uploaded video can be traced back to:
+   - training run,
+   - seed,
+   - training step,
+   - policy version,
+   - source region,
+   - exact restart fragments.
+10. The author can inspect the W&B candidates and manually select one clip for the final ICRA submission.
+
+---
+
+# 32. Priority order
+
+Implement in this order:
+
+### P0 — Must have
+
+1. event metadata capture
+2. exact restart-fragment association
+3. outcome feature computation
+4. diversity scoring
+5. candidate ranking
+6. post-training rendering
+7. W&B upload
+
+### P1 — Strongly preferred
+
+8. 10-second pre-event context
+9. replay-consistency verification
+10. diagnostic HUD
+
+### P2 — Optional
+
+11. richer partition diagnostic information
+12. automated final video concatenation
+
+Do not spend time on P2 until P0 and P1 are verified.
+
+---
+
+# 33. Final instruction to Codex
+
+Before modifying the code:
+
+1. read the current `scripts/train_v3.py`,
+2. read `src/herp/vector_acquisition.py`,
+3. read `src/herp/archive.py`,
+4. read `src/herp/envs/maniskill.py`,
+5. read the existing W&B/video example in `scripts/make_showcase_videos.py`.
+
+Preserve current algorithmic behavior.
+
+When uncertain between:
+
+```text
+better-looking video
+```
+
+and:
+
+```text
+more faithful scientific recording
+```
+
+always choose the latter.
