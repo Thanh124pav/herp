@@ -86,6 +86,9 @@ class VectorFragmentCollector:
         self.obs=None;self.fragment_id=0
         self.counters=dict(ROOT_ACQUISITION=0,REGION_ACQUISITION=0,REFERENCE=0)
         self.root_started=None
+        self.capture_diagnostics=False
+        self.current_restart_snapshots=None
+        self.current_restart_snapshot_indices=None
 
     @property
     def total_steps(self):return sum(self.counters.values())
@@ -97,6 +100,9 @@ class VectorFragmentCollector:
         sources=torch.zeros(n,dtype=torch.long) if ordinary or warmup else torch.multinomial(probs,n,replacement=True,generator=generator)
         sources[is_ref]=0
         started=torch.zeros(n,dtype=torch.bool) if self.root_started is None else self.root_started.clone()
+        if self.current_restart_snapshots is None:
+            self.current_restart_snapshots=[None for _ in range(n)]
+            self.current_restart_snapshot_indices=[None for _ in range(n)]
         # Entire round is stepped, so its budget is known exactly in advance.
         def start_jobs(which):
             nonlocal started
@@ -104,18 +110,34 @@ class VectorFragmentCollector:
             if self.obs is None:self.obs,_=self.adapter.reset()
             if len(roots):
                 current,_=self.adapter.reset_indices(roots);self.obs[roots.to(device)]=current[roots.to(device)]
+                for i in roots.tolist():
+                    self.current_restart_snapshots[i]=None
+                    self.current_restart_snapshot_indices[i]=None
             if len(local):
-                snaps=[archive.sample_snapshot(archive.regions[int(sources[i])]) for i in local]
+                sampled=[archive.sample_snapshot_with_index(archive.regions[int(sources[i])]) for i in local]
+                snaps=[pair[0] for pair in sampled]
                 restored=self.adapter.restore_state(local,[s.env_state for s in snaps])
                 error=float((restored.cpu()-torch.stack([s.obs for s in snaps])).abs().max())
                 if error>0.1:raise RuntimeError(f'GPU snapshot mismatch {error}')
                 elif error>1e-4:import warnings;warnings.warn(f'GPU snapshot drift {error:.6f}',stacklevel=2)
                 self.obs[local.to(device)]=restored
+                for j,i in enumerate(local.tolist()):
+                    self.current_restart_snapshots[i]=snaps[j] if self.capture_diagnostics else None
+                    self.current_restart_snapshot_indices[i]=sampled[j][1]
+            if len(roots) and self.capture_diagnostics:
+                saved=self.adapter.save_state(roots)
+                elapsed=self.adapter.elapsed_steps().cpu()
+                for j,i in enumerate(roots.tolist()):
+                    self.current_restart_snapshots[i]=Snapshot(
+                        saved[j],self.obs[i].detach().cpu().clone(),self.total_steps+i,
+                        elapsed_steps=int(elapsed[i]))
+                    self.current_restart_snapshot_indices[i]=None
             started[which]=True
             if self.observer:self.observer.new_jobs(which,sources[which])
         if self.obs is None or not ordinary:start_jobs(ids)
         # Preallocate time-major buffers; CPU transfer only once per vector step.
-        buffers={k:[] for k in ('obs','actions','rewards','logprobs','values','term','trunc','next','next_values','regions','applied','sources','starts')}
+        buffers={k:[] for k in ('obs','actions','rewards','logprobs','values','term','trunc','next','next_values','regions','applied','sources','starts','successes')}
+        restart_records=[]
         low,high=self.adapter.action_low(),self.adapter.action_high()
         for t in range(steps):
             with torch.no_grad():
@@ -127,7 +149,12 @@ class VectorFragmentCollector:
             actual_next=nxt.clone();done=term|trunc
             if bool(done.any()) and 'final_observation' in info:actual_next[done]=info['final_observation'][done]
             with torch.no_grad():nv=self.agent.get_value(actual_next)
-            row=(self.obs,action,reward,lp,value,term,trunc,actual_next,nv,regions,applied,sources,started)
+            success_info=info.get('final_info') if isinstance(info,dict) and info.get('final_info') is not None else info
+            successes=(self.adapter.success_from_info(success_info).detach()
+                       if self.capture_diagnostics and hasattr(self.adapter,'success_from_info')
+                       else torch.zeros(n,dtype=torch.bool,device=device))
+            row=(self.obs,action,reward,lp,value,term,trunc,actual_next,nv,regions,applied,sources,started,successes)
+            restart_records.append(list(zip(self.current_restart_snapshots,self.current_restart_snapshot_indices)))
             for k,x in zip(buffers,row):buffers[k].append(x.detach().cpu().clone())
             self.counters['REFERENCE']+=int(is_ref.sum())
             self.counters['ROOT_ACQUISITION']+=int(((sources==0)&~is_ref).sum())
@@ -161,9 +188,15 @@ class VectorFragmentCollector:
                 padded=torch.zeros(self.horizon,features.shape[-1]);mask=torch.zeros(self.horizon,dtype=torch.bool)
                 padded[:count]=features;mask[:count]=True
                 category='REFERENCE' if is_ref[i] else 'ROOT_ACQUISITION' if src==0 else 'REGION_ACQUISITION'
+                restart,restart_index=restart_records[left][i]
+                is_restart=bool(b['starts'][left,i])
                 f=RolloutFragment(src,version,self.fragment_id,b['obs'][sl,i].clone(),z,b['actions'][sl,i].clone(),b['rewards'][sl,i].clone(),
                     b['logprobs'][sl,i].clone(),b['values'][sl,i].clone(),b['term'][sl,i].clone(),b['trunc'][sl,i].clone(),mask,b['next_values'][right-1,i].clone(),
                     None,padded,b['next'][sl,i].clone(),b['next_values'][sl,i].clone(),chain_region_id=b['regions'][sl,i].clone(),
-                    category=category,acquisition_round=version,root_started=src==0 and bool(b['starts'][left,i]),slot_id=i)
+                    category=category,acquisition_round=version,root_started=src==0 and is_restart,slot_id=i,
+                    restart_region_id=src if is_restart else None,restart_snapshot_index=restart_index if is_restart else None,
+                    restart_snapshot_timestep=None if not is_restart or restart is None else int(restart.timestep),
+                    restart_snapshot_elapsed_steps=None if not is_restart or restart is None else int(restart.elapsed_steps),
+                    restart_snapshot=restart if is_restart and self.capture_diagnostics else None,successes=b['successes'][sl,i].clone())
                 self.fragment_id+=1;fragments.append(f)
         return fragments

@@ -5,12 +5,14 @@ uses one slot because PhysX GPU is unavailable on the target WSL machine.
 """
 from dataclasses import dataclass
 import torch
+from .archive import Snapshot
 
 @dataclass
 class AcquisitionJob:
     region_id: int
     snapshot: object = None
     max_steps: int = 32
+    snapshot_index: int | None = None
 
 @dataclass
 class RolloutFragment:
@@ -38,6 +40,12 @@ class RolloutFragment:
     acquisition_round: int = 0
     root_started: bool = False
     slot_id: int = 0
+    restart_region_id: int | None = None
+    restart_snapshot_index: int | None = None
+    restart_snapshot_timestep: int | None = None
+    restart_snapshot_elapsed_steps: int | None = None
+    restart_snapshot: object | None = None
+    successes: torch.Tensor | None = None
 
     def gae(self,gamma,gae_lambda):
         adv = torch.zeros_like(self.rewards)
@@ -74,6 +82,9 @@ class FragmentCollector:
         self.obs = None
         self.fragment_id = 0
         self.counters = dict(ROOT_ACQUISITION=0,REGION_ACQUISITION=0,REFERENCE=0)
+        self.capture_diagnostics = False
+        self.current_restart_snapshot = None
+        self.current_restart_snapshot_index = None
 
     @property
     def total_steps(self):
@@ -85,11 +96,19 @@ class FragmentCollector:
         if reset:
             if job.region_id==0:
                 self.obs,_ = self.adapter.reset()
+                if self.capture_diagnostics:
+                    saved = self.adapter.save_state(torch.tensor([0]))[0]
+                    self.current_restart_snapshot = Snapshot(
+                        saved, self.obs[0].detach().cpu().clone(), self.total_steps,
+                        elapsed_steps=int(getattr(saved, 'elapsed_steps', 0)))
+                    self.current_restart_snapshot_index = None
             else:
                 self.obs = self.adapter.restore_state(torch.tensor([0]),[job.snapshot.env_state])
                 error = float((self.obs[0].cpu()-job.snapshot.obs).abs().max())
                 if error>1e-4:
                     raise RuntimeError(f'Snapshot restore observation mismatch {error}')
+                self.current_restart_snapshot = job.snapshot if self.capture_diagnostics else None
+                self.current_restart_snapshot_index = job.snapshot_index
             if self.observer:
                 self.observer.new_fragment(job.region_id,root_started)
         elif self.obs is None:
@@ -105,17 +124,21 @@ class FragmentCollector:
             self.counters[category] += 1
             done = bool(term[0]|trunc[0])
             actual_next = info['final_observation'] if done and 'final_observation' in info else nxt
+            success_info = info.get('final_info') if done and isinstance(info,dict) and info.get('final_info') is not None else info
+            success = (self.adapter.success_from_info(success_info)[0].detach().cpu()
+                       if self.capture_diagnostics and hasattr(self.adapter,'success_from_info')
+                       else torch.tensor(False))
             with torch.no_grad():
                 nv = self.agent.get_value(actual_next)[0].cpu()
             rows.append((self.obs[0].cpu(),action[0].cpu(),reward[0].cpu(),lp[0].cpu(),value[0].cpu(),
-                         term[0].cpu(),trunc[0].cpu(),actual_next[0].cpu(),nv,rid,applied[0].cpu()))
+                         term[0].cpu(),trunc[0].cpu(),actual_next[0].cpu(),nv,rid,applied[0].cpu(),success))
             self.obs = nxt
             if done:
                 if self.observer:
                     self.observer.end_episode()
                 break
-        obs,a,r,lp,v,term,trunc,nxt,nv,rid,applied = zip(*rows)
-        obs,a,r,lp,v,term,trunc,nxt,nv,applied = map(torch.stack,(obs,a,r,lp,v,term,trunc,nxt,nv,applied))
+        obs,a,r,lp,v,term,trunc,nxt,nv,rid,applied,success = zip(*rows)
+        obs,a,r,lp,v,term,trunc,nxt,nv,applied,success = map(torch.stack,(obs,a,r,lp,v,term,trunc,nxt,nv,applied,success))
         z = self.normalizer.normalize(nxt)
         # Executed actions are normalized by the simulator's action-space scale.
         low,high = self.adapter.action_low().cpu().reshape(-1),self.adapter.action_high().cpu().reshape(-1)
@@ -125,7 +148,13 @@ class FragmentCollector:
         n = min(len(f),self.horizon); padded[:n] = f[:n]; valid[:n] = True
         fragment = RolloutFragment(job.region_id,version,self.fragment_id,obs,z,a,r,lp,v,term,trunc,
             valid,nv[-1],None if job.snapshot is None else job.snapshot.timestep,padded,nxt,nv,
-            chain_region_id=torch.tensor(rid),category=category,acquisition_round=version,root_started=root_started)
+            chain_region_id=torch.tensor(rid),category=category,acquisition_round=version,root_started=root_started,
+            restart_region_id=job.region_id if reset else None,
+            restart_snapshot_index=self.current_restart_snapshot_index if reset else None,
+            restart_snapshot_timestep=(None if not reset or self.current_restart_snapshot is None else int(self.current_restart_snapshot.timestep)),
+            restart_snapshot_elapsed_steps=(None if not reset or self.current_restart_snapshot is None else int(self.current_restart_snapshot.elapsed_steps)),
+            restart_snapshot=self.current_restart_snapshot if reset and self.capture_diagnostics else None,
+            successes=success)
         self.fragment_id += 1
         return fragment
 

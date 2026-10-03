@@ -84,6 +84,7 @@ class ManiSkillAdapter(EnvAdapter):
         device: str | torch.device = "cuda",
         reconfiguration_freq: int | None = None,
         ignore_terminations: bool = False,
+        enable_rendering: bool = False,
         **_,
     ):
         self.env_id = env_id
@@ -95,6 +96,7 @@ class ManiSkillAdapter(EnvAdapter):
         self.device = torch.device(device)
         self.reconfiguration_freq = reconfiguration_freq
         self.ignore_terminations = ignore_terminations
+        self.enable_rendering = enable_rendering
         self.env = None
         self._counter = None  # per-env step counter (num_envs,)
         self._observation_info = None
@@ -115,7 +117,7 @@ class ManiSkillAdapter(EnvAdapter):
         # backend appears to behave slightly differently when render_mode
         # is None vs "rgb_array" (renderer init path), so mirror the recipe
         # exactly to avoid divergence from the upstream baseline.
-        render_mode = "rgb_array" if self.sim_backend == "physx_cuda" else None
+        render_mode = "rgb_array" if self.enable_rendering or self.sim_backend == "physx_cuda" else None
         env = gym.make(
             self.env_id,
             num_envs=num_envs,
@@ -244,6 +246,15 @@ class ManiSkillAdapter(EnvAdapter):
         self._observation_info = _detach_clone(restored_info)
         obs_t = obs.to(self.device).float() if torch.is_tensor(obs) else torch.as_tensor(obs, device=self.device).float()
         return obs_t[env_ids.to(obs_t.device)]
+
+    def render(self) -> np.ndarray:
+        frame = self.env.render()
+        if torch.is_tensor(frame):
+            frame = frame.detach().cpu().numpy()
+        frame = np.asarray(frame)
+        if frame.ndim == 4:
+            frame = frame[0]
+        return frame
 
     # ------------------------------------------------------------------ features
 

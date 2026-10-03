@@ -15,12 +15,14 @@ from herp.chain_features import RunningFeatureNormalizer
 from herp.v3_observer import PartitionObserver
 from herp.vector_acquisition import VectorPartitionObserver,VectorFragmentCollector
 from herp.sigma_predictor import LinearVariancePredictor,region_predictor_features,combined_q
-from herp.sigma import direct_q_estimate,root_total_variance
+from herp.sigma import (apply_terminal_noop_padding,direct_q_estimate,
+                        root_total_variance,sigma_fragment_eligible)
 from herp.allocator import v3_priority_distribution,allocate_fragments
 from herp.acquisition import AcquisitionJob,AcquisitionScheduler,FragmentCollector,concatenate_batches
 from herp.gradient_signature import policy_gradient_signature
 from herp.envs import make_adapter
 from herp.baselines import RND,Disagreement
+from herp.video_events import CandidateStore,build_event,event_is_valid
 
 METHODS=['ppo','rnd','disagreement','uniform','state_radius_uniform','state_radius_psigma',
          'plr_region','sacl_style','herp_sigma','herp_p','herp']
@@ -118,6 +120,23 @@ def main(argv=None):
     p.add_argument('--wandb-run-name',default='')
     p.add_argument('--wandb-tags',default='')
     p.add_argument('--wandb-log-every',type=int,default=1)
+    p.add_argument('--capture-video-events',action='store_true')
+    p.add_argument('--video-fps',type=int,default=30)
+    p.add_argument('--video-pre-seconds',type=float,default=10.)
+    p.add_argument('--video-post-seconds',type=float,default=20.)
+    p.add_argument('--video-max-seconds',type=float,default=40.)
+    p.add_argument('--video-max-candidates',type=int,default=20)
+    p.add_argument('--video-upload-top-k',type=int,default=5)
+    p.add_argument('--video-min-region-prob',type=float,default=.05)
+    p.add_argument('--video-min-allocated-fragments',type=int,default=2)
+    p.add_argument('--video-min-valid-fragments',type=int,default=3)
+    p.add_argument('--video-min-distinct-outcomes',type=int,default=2)
+    p.add_argument('--video-min-outcome-diversity',type=float,default=0.)
+    p.add_argument('--video-outcome-radius',type=float,default=1.)
+    p.add_argument('--video-resolution',type=int,default=720)
+    p.add_argument('--video-replay-tolerance',type=float,default=1e-3)
+    p.add_argument('--video-event-dir',default='')
+    p.add_argument('--video-wandb-prefix',default='mira_events')
     # Env config knobs — must match the upstream ManiSkill PPO baseline
     # (pd_ee_delta_pose + dense) to reproduce the 100%-success 1M runs;
     # the adapter's own defaults (pd_joint_delta_pos + normalized_dense)
@@ -128,6 +147,11 @@ def main(argv=None):
     args=p.parse_args(argv)
     if args.sigma_kappa<0 or args.future_horizon<2 or args.eval_episodes<1 or args.wandb_log_every<1:
         p.error('Invalid sigma kappa, horizon, evaluation episodes or logging interval')
+    if (args.video_fps<1 or args.video_pre_seconds<0 or args.video_post_seconds<0
+            or args.video_max_seconds<=0 or args.video_max_candidates<1
+            or args.video_upload_top_k<0 or args.video_outcome_radius<=0
+            or not 0<=args.video_min_region_prob<=1):
+        p.error('Invalid video capture settings')
     out=Path(args.output_dir);out.mkdir(parents=True,exist_ok=True)
     if not args.resume_from and args.auto_resume:
         candidates=sorted(out.glob('checkpoint_*.pt'),key=lambda x:x.stat().st_mtime)
@@ -174,6 +198,7 @@ def main(argv=None):
     archive=RegionArchive(cfg.max_snapshots_per_region,args.seed);archive.ensure_root()
     observer=(VectorPartitionObserver if vector else PartitionObserver)(env,archive,normalizer,cfg,args.method.startswith('state_radius'))
     collector=(VectorFragmentCollector if vector else FragmentCollector)(env,agent,normalizer,cfg.future_horizon,cfg.action_feature_weight)
+    collector.capture_diagnostics=args.capture_video_events
     predictor=LinearVariancePredictor(ridge=cfg.predictor_ridge)
     cache=defaultdict(lambda:deque(maxlen=cfg.max_sigma_fragments_per_region))
     child_mean_cache=defaultdict(lambda:deque(maxlen=cfg.max_sigma_fragments_per_region))
@@ -247,6 +272,16 @@ def main(argv=None):
         source_snapshot='source.tar.gz',root_total_variance='child-entry proxy; direct root logged separately',
         sacl_style='value change on fixed archived representative state; uncertainty coefficient zero'))
     metrics_file=open(out/'metrics.jsonl','a',buffering=1);regions_file=open(out/'regions.jsonl','a',buffering=1)
+    video_dir=Path(args.video_event_dir) if args.video_event_dir else out/'video_events'
+    video_store=CandidateStore(video_dir,args.video_max_candidates) if args.capture_video_events else None
+    video_history=defaultdict(list)
+
+    def trim_video_history(rows):
+        limit=max(1,int(args.video_pre_seconds*args.video_fps))
+        total=sum(len(f.rewards) for f in rows)
+        while len(rows)>1 and total-len(rows[0].rewards)>=limit:
+            total-=len(rows.pop(0).rewards)
+        return rows
 
     def save_checkpoint(name):
         adapter=observer.adapter;observer.adapter=None
@@ -284,7 +319,7 @@ def main(argv=None):
         if not warmup and activation is None:activation=collector.total_steps
         collection_start=time.time()
         if vector:
-            regions=archive.regions
+            regions=list(archive.regions)
             probs=v3_priority_distribution(regions,cfg,args.method)
             nref=0 if ordinary or version==0 else min(args.reference_slots,args.num_envs-1)
             batch=collector.collect_round(archive,probs,version,generator,nref,ordinary or version==0,warmup,remaining//args.num_envs)
@@ -292,7 +327,7 @@ def main(argv=None):
             allocations={r.region_id:0 for r in regions}
             for f in batch:
                 allocations[f.source_region_id]=allocations.get(f.source_region_id,0)+1
-                if (f.root_started or f.source_region_id>0) and len(f.rewards)==cfg.future_horizon:
+                if (f.root_started or f.source_region_id>0) and sigma_fragment_eligible(f,cfg.future_horizon):
                     fresh[f.source_region_id].append(f)
         else:
             # Ordinary-reset reference traverses whole episodes, allowing discovery at
@@ -303,8 +338,8 @@ def main(argv=None):
                 reset=not for_ref or bool(for_ref[-1].terminated[-1]|for_ref[-1].truncated[-1])
                 f=collector.collect(AcquisitionJob(0,max_steps=min(cfg.future_horizon,nref)),version,'REFERENCE',reset=reset)
                 for_ref.append(f);batch.append(f);nref-=len(f.rewards);remaining-=len(f.rewards)
-                if f.root_started and len(f.rewards)==cfg.future_horizon:fresh[0].append(f)
-            regions=archive.regions
+                if f.root_started and sigma_fragment_eligible(f,cfg.future_horizon):fresh[0].append(f)
+            regions=list(archive.regions)
             probs=v3_priority_distribution(regions,cfg,args.method)
             allocations={r.region_id:0 for r in regions}
             while remaining>0:
@@ -314,11 +349,43 @@ def main(argv=None):
                     rid=0;snap=None
                 else:
                     rid=0 if warmup else int(torch.multinomial(probs,1,generator=generator))
-                    snap=None if rid==0 else archive.sample_snapshot(archive.regions[rid]);reset=True
-                f=collector.collect(AcquisitionJob(rid,snap,min(cfg.future_horizon,remaining)),version,reset=reset)
+                    if rid==0:
+                        snap=None;snap_idx=None
+                    else:
+                        snap,snap_idx=archive.sample_snapshot_with_index(archive.regions[rid])
+                    reset=True
+                if ordinary or version==0:snap_idx=None
+                f=collector.collect(AcquisitionJob(rid,snap,min(cfg.future_horizon,remaining),snap_idx),version,reset=reset)
                 batch.append(f);remaining-=len(f.rewards)
                 allocations[rid]=allocations.get(rid,0)+1
-                if (f.root_started or rid>0) and len(f.rewards)==cfg.future_horizon:fresh[rid].append(f)
+                if (f.root_started or rid>0) and sigma_fragment_eligible(f,cfg.future_horizon):fresh[rid].append(f)
+        prob_by_region={r.region_id:float(probs[i]) for i,r in enumerate(regions)}
+        pending_video=[]
+        if args.capture_video_events and args.method=='herp' and not warmup:
+            root_fraction=allocations.get(0,0)/max(1,sum(allocations.values()))
+            allocation_entropy=float(-torch.special.xlogy(probs,probs.clamp_min(1e-12)).sum())
+            for region in regions:
+                rid=region.region_id
+                event_fragments=[f for f in batch if f.source_region_id==rid and f.category=='REGION_ACQUISITION']
+                if (rid>0 and allocations.get(rid,0)>=args.video_min_allocated_fragments
+                        and prob_by_region.get(rid,0.)>=args.video_min_region_prob
+                        and region.snapshots and event_fragments
+                        and any(f.restart_snapshot is not None for f in event_fragments)):
+                    metadata=dict(
+                        event_id=f'step{collector.total_steps:09d}_r{rid}_v{version}',
+                        training_step=collector.total_steps,policy_version=version,region_id=rid,
+                        p_raw=float(region.p_raw),p_ema=float(region.p_ema),sigma_raw=float(region.sigma_raw),
+                        q_direct=float(region.q_direct),q_pred=float(region.q_pred),q_combined=float(region.q_combined),
+                        allocation_prob=prob_by_region[rid],allocated_fragments=len(event_fragments),
+                        root_fraction=root_fraction,allocation_entropy=allocation_entropy,
+                        source=dict(benchmark=args.benchmark,env_id=args.env_id,
+                            control_mode=args.control_mode,reward_mode=args.reward_mode,
+                            obs_mode=args.obs_mode,sim_backend=sim,device=device,
+                            render_backend='gpu' if vector else 'cpu',seed=args.seed,method=args.method,
+                            output_dir=str(out),training_run_id=None if wandb_run is None else wandb_run.id,
+                            checkpoint='checkpoint_final.pt',checkpoint_role='run_provenance_not_event_policy',
+                            replay_action_source='stored_exact_actions'))
+                    pending_video.append((metadata,event_fragments))
         collection_seconds=time.time()-collection_start
         processing_start=time.time()
         if version==0:
@@ -327,7 +394,9 @@ def main(argv=None):
             # Normalize already collected first-batch futures with the newly
             # fitted, subsequently frozen transform before storing any labels.
             for f in batch:
-                n=len(f.rewards);f.traj_features[:n,:env.obs_dim]=normalizer.normalize(f.next_states)
+                n=len(f.rewards);f.state_features=normalizer.normalize(f.next_states)
+                f.traj_features[:n,:env.obs_dim]=f.state_features
+                apply_terminal_noop_padding(f,env.obs_dim,cfg.future_horizon)
         else:
             old_mean=normalizer.mean.clone()
             old_scale=(normalizer.m2/normalizer.count).sqrt().clamp_min(normalizer.eps)
@@ -346,6 +415,22 @@ def main(argv=None):
                 n=len(f.rewards)
                 f.state_features=normalizer.normalize(f.next_states)
                 f.traj_features[:n,:env.obs_dim]=f.state_features
+                apply_terminal_noop_padding(f,env.obs_dim,cfg.future_horizon)
+        if args.capture_video_events:
+            for metadata,event_fragments in pending_video:
+                first=min(event_fragments,key=lambda f:f.fragment_id)
+                earlier=[f for f in batch if f.slot_id==first.slot_id and f.fragment_id<first.fragment_id
+                         and f.restart_snapshot is not None]
+                pre=trim_video_history(list(video_history[first.slot_id])+earlier)
+                event=build_event(metadata=metadata,fragments=event_fragments,pre_fragments=pre,
+                                  radius=args.video_outcome_radius)
+                if event_is_valid(event,args.video_min_valid_fragments,args.video_min_distinct_outcomes,
+                                  args.video_min_outcome_diversity):
+                    video_store.consider(event)
+            for fragment in batch:
+                if fragment.restart_snapshot is not None:
+                    video_history[fragment.slot_id].append(fragment)
+                    trim_video_history(video_history[fragment.slot_id])
         if intrinsic:
             for f in batch:
                 z=normalizer.normalize(f.states);zn=normalizer.normalize(f.next_states)
@@ -384,7 +469,8 @@ def main(argv=None):
         current_q={};means={rid:torch.stack([x for _,x in rows]).mean(0).flatten()/math.sqrt(cfg.future_horizon)
                              for rid,rows in child_mean_cache.items() if rows}
         for r in archive:
-            recent=[f for f in cache[r.region_id] if version-f.policy_version<=cfg.max_sigma_policy_lag]
+            recent=[f for f in cache[r.region_id] if version-f.policy_version<=cfg.max_sigma_policy_lag
+                    and sigma_fragment_eligible(f,cfg.future_horizon)]
             q,pairs=direct_q_estimate(recent,cfg.min_common_steps)
             r.q_direct=q;r.sigma_sample_count=len(recent);current_q[r.region_id]=q
             if recent:means[r.region_id]=torch.stack([f.traj_features for f in recent]).mean(0).flatten()/math.sqrt(cfg.future_horizon)
@@ -434,7 +520,9 @@ def main(argv=None):
         metrics_file.write(json.dumps(record)+'\n')
         for r in archive:
             row={k:v for k,v in vars(r).items() if k not in ('centroid','snapshots')}
-            row.update(step=collector.total_steps,policy_version=version,allocated_fragments=allocations.get(r.region_id,0))
+            row.update(step=collector.total_steps,policy_version=version,
+                allocation_prob=prob_by_region.get(r.region_id),
+                allocated_fragments=allocations.get(r.region_id,0))
             regions_file.write(json.dumps(row)+'\n')
         if version%8==0:print(json.dumps(record),flush=True)
         if wandb_run is not None and version%args.wandb_log_every==0:
@@ -460,6 +548,19 @@ def main(argv=None):
     json_write(out/'summary.json',dict(status='completed',method=args.method,env_id=args.env_id,seed=args.seed,
         training_steps=collector.total_steps,budget=collector.counters,eval_steps=eval_steps,
         final_evaluation=ev,activation_step=activation,wall_seconds=time.time()-started))
+    env.close();eval_env.close()
+    if args.capture_video_events:
+        video_store.rank()
+        try:
+            from scripts.render_mira_video_events import render_ranked_events
+            render_ranked_events(video_dir,top_k=args.video_upload_top_k,fps=args.video_fps,
+                pre_seconds=args.video_pre_seconds,post_seconds=args.video_post_seconds,
+                max_seconds=args.video_max_seconds,resolution=args.video_resolution,
+                replay_tolerance=args.video_replay_tolerance,wandb_run=wandb_run,
+                wandb_module=wandb_module,wandb_prefix=args.video_wandb_prefix)
+        except Exception as exc:
+            json_write(video_dir/'render_error.json',dict(type=type(exc).__name__,message=str(exc)))
+            print(f'[video-events] post-training render deferred: {type(exc).__name__}: {exc}',flush=True)
     if wandb_run is not None:
         wandb_run.summary['final/success']=ev['eval_success']
         wandb_run.summary['final/return']=ev['eval_return']
@@ -468,7 +569,7 @@ def main(argv=None):
         wandb_run.summary['final/global_env_steps']=collector.total_steps
         wandb_run.summary['final/wall_seconds']=time.time()-started
         wandb_run.finish()
-    env.close();eval_env.close();metrics_file.close();regions_file.close()
+    metrics_file.close();regions_file.close()
 
 def concatenate_raw(fs):
     return {k:torch.cat([getattr(f,k) for f in fs]) for k in ('states','actions','next_states')}
